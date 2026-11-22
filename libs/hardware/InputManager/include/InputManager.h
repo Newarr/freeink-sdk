@@ -14,6 +14,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cstdint>
 
 class InputManager {
@@ -36,23 +37,22 @@ class InputManager {
 
   // Press edge since the previous update().
   bool wasPressed(uint8_t buttonIndex) const;
+  uint8_t wasPressedCount(uint8_t buttonIndex) const;
 
   // Any button press edge since the previous update().
   bool wasAnyPressed() const;
 
   // Release edge since the previous update().
   bool wasReleased(uint8_t buttonIndex) const;
+  uint8_t wasReleasedCount(uint8_t buttonIndex) const;
 
   // Any button release edge since the previous update().
   bool wasAnyReleased() const;
 
-  // True while a raw state change is still inside the debounce window (the last
-  // raw sample differs from the committed state). A change only commits after
-  // two consecutive matching samples, so hosts that poll slowly (e.g. a
-  // sleep-sliced idle loop) should re-poll quickly while this is set —
-  // otherwise a press shorter than the poll period lands in a single sample and
-  // is dropped.
-  bool isDebouncePending() const { return lastState != currentState; }
+  // True while a raw state change is still inside the debounce window.
+  bool isDebouncePending() const;
+  uint32_t pressSequence() const;
+  bool rawContactActive() const;
 
   // Duration between the first button press and final release.
   unsigned long getHeldTime() const;
@@ -219,10 +219,10 @@ class InputManager {
   bool hasToggleSwitch() const { return BoardConfig::ACTIVE.input.toggleSwitch >= 0; }
   // Debounced switch position; begin() latches the boot position without
   // raising a change event. False on boards without a switch.
-  bool isToggleSwitchOn() const { return toggleSwitchOn; }
-  // True for the one update() in which the debounced position changed. Under
-  // beginAsync() the task consumes this edge; poll isToggleSwitchOn() instead.
-  bool wasToggleSwitchChanged() const { return toggleSwitchChangedEvent; }
+  bool isToggleSwitchOn() const { return isAsyncActive() ? _asyncFrame.toggleOn : toggleSwitchOn; }
+  // True for the one update() in which the debounced position changed.
+  // With async polling, use isToggleSwitchOn() to read the position.
+  bool wasToggleSwitchChanged() const { return !isAsyncActive() && toggleSwitchChangedEvent; }
 
   // Touch INT line usable as a light-sleep wake source, or -1. A host can only
   // wake from light sleep on a GPIO LEVEL (the edge detector is clock-gated
@@ -262,16 +262,10 @@ class InputManager {
   }
 
   // --- Optional background polling -------------------------------------------
-  // Spawns a FreeRTOS task that samples the buttons every pollMs and latches
-  // each press edge (a BTN_* index) into an internal queue. This decouples
-  // input from rendering: on e-paper, a slow refresh blocks the app's main
-  // loop, so a press that lands mid-refresh is otherwise lost — the task keeps
-  // sampling (refresh busy-waits yield via delay()) and the app drains presses
-  // with popPress() afterward. No-op if already started.
-  //
-  // When async polling is active the app must NOT call update()/wasPressed()
-  // itself; the task owns the edge state. Drain with popPress() instead.
-  void beginAsync(uint8_t taskPriority = 2, uint32_t pollMs = 15, uint8_t queueLen = 32);
+  // Poll on a background task. update() collects button counts and levels
+  // since the previous update. The pop methods drain queued presses and gestures.
+  bool beginAsync(uint32_t pollIntervalMs = 5);
+  bool isAsyncActive() const;
 
   // Pop the next latched button index (BTN_*) into `button`. Returns false when
   // no press is pending (or async polling was never started).
@@ -319,15 +313,36 @@ class InputManager {
     int button;  // classified BTN_* index, or -1 for no match
   };
 
-  // Sample both button-group ADC pins now (synchronous analogRead). Safe to
-  // call alongside async polling. On boards without the Xteink ADC ladder both
-  // samples report raw = -1, button = -1.
+  // Read both ADC pins in sync mode or use the latest async sample.
+  // Boards without the Xteink ADC ladder report raw = -1, button = -1.
   void readButtonAdc(ButtonAdcSample& group1, ButtonAdcSample& group2);
 
  private:
   static ButtonHook s_buttonHook;
 
+  static constexpr uint8_t BUTTON_COUNT = BTN_POWER + 1;
+  struct AsyncButtonFrame {
+    uint32_t pressed[BUTTON_COUNT]{};
+    uint32_t released[BUTTON_COUNT]{};
+    unsigned long holdTime = 0;
+    unsigned long powerHoldTime = 0;
+    uint8_t state = 0;
+    bool debouncePending = false;
+    bool toggleOn = false;
+#if FREEINK_DEVICE_PAPERMONO
+    bool powerClick = false;
+#endif
+  };
+  AsyncButtonFrame _asyncFrame;
+  uint8_t _asyncPressed[BUTTON_COUNT]{};
+  uint8_t _asyncReleased[BUTTON_COUNT]{};
+  std::atomic<bool> _asyncActive{false};
+  std::atomic<uint32_t> _rawContacts{0};
+  std::atomic<uint32_t> _pressSequence{0};
+  std::atomic<uint32_t> _asyncAdc{UINT32_MAX};
+  QueueHandle_t _asyncButtonFrames = nullptr;
   QueueHandle_t _asyncQueue = nullptr;
+#if FREEINK_CAP_TOUCH
   QueueHandle_t _asyncTapQueue = nullptr;
   QueueHandle_t _asyncSwipeQueue = nullptr;
   struct QueuedMultiTouchSwipe {
@@ -353,12 +368,27 @@ class InputManager {
     uint16_t durationMs;
   };
   QueueHandle_t _asyncMultiTouchPinchQueue = nullptr;
-  TaskHandle_t _asyncTask = nullptr;
-  uint32_t _asyncPollMs = 15;
+#endif
+  uint32_t _asyncPollMs = 5;
   static void asyncTaskTrampoline(void* self);
   void asyncPoll();
+  void snapshotButtons(AsyncButtonFrame& frame) const;
+  void pollInput();
+  uint8_t updateButtons(unsigned long now, uint32_t& adcReadings);
+  uint8_t sampleState(uint32_t* adcReadings = nullptr);
+  uint8_t samplePhysicalButtons(uint32_t* adcReadings = nullptr) const;
+  uint16_t contactMask(uint8_t buttons, uint32_t adcReadings) const;
 
-  int getButtonFromADC(int adcValue, const int ranges[], int numButtons);
+  struct LadderDebounce {
+    uint8_t filter(uint8_t raw, uint8_t stable, unsigned long now);
+    unsigned long candidateSince = 0;
+    uint8_t candidate = 0;
+    uint8_t idlePolls = 0;
+  };
+  LadderDebounce _ladderGroup1;
+  LadderDebounce _ladderGroup2;
+
+  static int getButtonFromADC(int adcValue, const int ranges[], int numButtons);
   bool isDigitalPressed(int8_t pin) const;
   uint8_t getDigitalState() const;
   void updateConfirmBackHold(unsigned long currentTime);
@@ -534,6 +564,8 @@ class InputManager {
 
   static constexpr int ADC_NO_BUTTON = 3900;
   static constexpr unsigned long DEBOUNCE_DELAY = 5;
+  static constexpr uint32_t LADDER_PRESS_CONFIRM_MS = 2;
+  static constexpr uint8_t LADDER_RELEASE_POLLS = 3;
   static constexpr unsigned long CONFIRM_BACK_HOLD_MS = 650;
   static constexpr unsigned long CONFIRM_POWER_HOLD_MS = 400;
   static constexpr unsigned long TWO_BUTTON_HOLD_MS = 650;

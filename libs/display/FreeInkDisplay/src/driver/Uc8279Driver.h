@@ -52,8 +52,11 @@ class Uc8279Driver : public PanelDriver {
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
 
+  void controllerIdle(EpdBus& bus) override;
+  void setBackgroundHint(bool darkBackground) override { _darkBackground = darkBackground; }
   bool canStageNextFrame() const override;
-  bool stageNextFrame(EpdBus& bus, const uint8_t* fb) override;
+  bool stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*) = nullptr,
+                      void* abortCtx = nullptr) override;
   bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) override;
 
   // --- 4-level grayscale / anti-aliasing (mirrors the UC8253 X3 sibling) ---
@@ -112,6 +115,8 @@ class Uc8279Driver : public PanelDriver {
   uint32_t _bufferSize;
 
   bool _isScreenOn = false;
+  bool _idlePoweredOff = false;
+  bool _darkBackground = false;
   bool _firstRefresh = true;    // CDI 0x97 on the first refresh after init, 0xD7 after
   bool _oldPlaneValid = false;  // DTM1 holds a real previous frame (differential baseline)
   bool _forceFullSyncNext = false;

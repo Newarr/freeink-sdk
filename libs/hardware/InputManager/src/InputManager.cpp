@@ -57,6 +57,23 @@ const int InputManager::ADC_RANGES_2[] = {ADC_NO_BUTTON, 1120, INT32_MIN};
 const char* InputManager::BUTTON_NAMES[] = {"Back", "Confirm", "Left", "Right", "Up", "Down", "Power"};
 
 namespace {
+constexpr uint8_t ladderGroup1Mask = 0x0F;
+constexpr uint8_t ladderGroup2Mask = 0x30;
+constexpr uint8_t ladderMask = ladderGroup1Mask | ladderGroup2Mask;
+constexpr uint8_t buttonMask = (1u << (InputManager::BTN_POWER + 1)) - 1;
+constexpr uint32_t adcMask = 0xFFF;
+constexpr int adcBits = 12;
+constexpr int adcIdleRailMin = 4000;
+constexpr uint32_t noAdcReading = UINT32_MAX;
+
+uint32_t sampleXteinkAdc() {
+  (void)analogRead(InputManager::BUTTON_ADC_PIN_1);
+  const uint32_t group1 = analogRead(InputManager::BUTTON_ADC_PIN_1);
+  (void)analogRead(InputManager::BUTTON_ADC_PIN_2);
+  const uint32_t group2 = analogRead(InputManager::BUTTON_ADC_PIN_2);
+  return (group1 & adcMask) | ((group2 & adcMask) << adcBits);
+}
+
 int absInt(const int value) { return value < 0 ? -value : value; }
 
 #if defined(TOUCH_PROBE_DEBUG)
@@ -180,19 +197,32 @@ void InputManager::readButtonAdc(ButtonAdcSample& group1, ButtonAdcSample& group
     return;
   }
 
-  group1.raw = analogRead(BUTTON_ADC_PIN_1);
+  const uint32_t sample = isAsyncActive() ? _asyncAdc.load(std::memory_order_relaxed) : sampleXteinkAdc();
+  if (sample == noAdcReading) return;
+  group1.raw = sample & adcMask;
   group1.button = getButtonFromADC(group1.raw, ADC_RANGES_1, NUM_BUTTONS_1);
-
-  group2.raw = analogRead(BUTTON_ADC_PIN_2);
-  const int b2 = getButtonFromADC(group2.raw, ADC_RANGES_2, NUM_BUTTONS_2);
-  group2.button = b2 >= 0 ? b2 + 4 : -1;  // map group-2 local 0/1 to BTN_UP / BTN_DOWN
+  group2.raw = (sample >> adcBits) & adcMask;
+  const int button2 = getButtonFromADC(group2.raw, ADC_RANGES_2, NUM_BUTTONS_2);
+  group2.button = button2 >= 0 ? BTN_UP + button2 : -1;
 }
 
 uint8_t InputManager::getState() {
+  return isAsyncActive() ? _rawContacts.load(std::memory_order_relaxed) & buttonMask : sampleState();
+}
+
+uint8_t InputManager::sampleState(uint32_t* adcReadings) {
+  uint8_t state = samplePhysicalButtons(adcReadings);
+  state |= serviceTouch();
+  if (s_buttonHook) state |= s_buttonHook();
+  return state;
+}
+
+uint8_t InputManager::samplePhysicalButtons(uint32_t* adcReadings) const {
   uint8_t state = 0;
 
   if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::OnePageAdcLadder) {
     if (BoardConfig::ACTIVE.input.adcLadderPin >= 0) {
+      (void)analogRead(BoardConfig::ACTIVE.input.adcLadderPin);
       const int mv = analogReadMilliVolts(BoardConfig::ACTIVE.input.adcLadderPin);
       if (mv >= 2400 && mv <= 2800)      state |= (1 << BTN_BACK);    // ~2592 mV
       else if (mv >= 1780 && mv <= 2140) state |= (1 << BTN_LEFT);    // ~1956 mV
@@ -211,42 +241,54 @@ uint8_t InputManager::getState() {
         state |= (1 << BTN_POWER);
       }
     }
-    state |= serviceTouch();
-    if (s_buttonHook) state |= s_buttonHook();
     return state;
   }
 
-  if (BoardConfig::ACTIVE.inputStyle != BoardConfig::InputStyle::XteinkAdcLadder) {
-    state = getDigitalState();
-    state |= serviceTouch();                    // run the touch machine; OR any synthesized button
-    if (s_buttonHook) state |= s_buttonHook();  // board buttons (e.g. I2C expander)
-    return state;
-  }
+  if (BoardConfig::ACTIVE.inputStyle != BoardConfig::InputStyle::XteinkAdcLadder) return getDigitalState();
 
-  // Read GPIO1 buttons
-  const int adcValue1 = analogRead(BUTTON_ADC_PIN_1);
-  const int button1 = getButtonFromADC(adcValue1, ADC_RANGES_1, NUM_BUTTONS_1);
-  if (button1 >= 0) {
-    state |= (1 << button1);
-  }
-
-  // Read GPIO2 buttons
-  const int adcValue2 = analogRead(BUTTON_ADC_PIN_2);
-  const int button2 = getButtonFromADC(adcValue2, ADC_RANGES_2, NUM_BUTTONS_2);
-  if (button2 >= 0) {
-    state |= (1 << (button2 + 4));
-  }
-
-  // Read power button (polarity per board; X4 active-LOW, Silkscreen active-HIGH)
-  const int powerActiveLevel = BoardConfig::ACTIVE.input.powerActiveHigh ? HIGH : LOW;
-  if (digitalRead(BoardConfig::ACTIVE.input.power) == powerActiveLevel) {
-    state |= (1 << BTN_POWER);
-  }
-
-  state |= serviceTouch();
-  if (s_buttonHook) state |= s_buttonHook();  // board buttons (e.g. I2C expander)
+  const uint32_t sample = sampleXteinkAdc();
+  if (adcReadings) *adcReadings = sample;
+  const int button1 = getButtonFromADC(sample & adcMask, ADC_RANGES_1, NUM_BUTTONS_1);
+  const int button2 = getButtonFromADC((sample >> adcBits) & adcMask, ADC_RANGES_2, NUM_BUTTONS_2);
+  if (button1 >= 0) state |= 1u << button1;
+  if (button2 >= 0) state |= 1u << (BTN_UP + button2);
+  if (isPowerButtonPhysicallyPressed()) state |= 1u << BTN_POWER;
   return state;
 }
+
+uint16_t InputManager::contactMask(uint8_t buttons, uint32_t adcReadings) const {
+  uint16_t contacts = buttons;
+  if (adcReadings != noAdcReading) {
+    const int group1 = adcReadings & adcMask;
+    const int group2 = (adcReadings >> adcBits) & adcMask;
+    if (group1 > ADC_NO_BUTTON && group1 < adcIdleRailMin) contacts |= 1u << 7;
+    if (group2 > ADC_NO_BUTTON && group2 < adcIdleRailMin) contacts |= 1u << 8;
+  }
+  const auto style = BoardConfig::ACTIVE.inputStyle;
+  if (style == BoardConfig::InputStyle::DigitalConfirmBackHold ||
+      style == BoardConfig::InputStyle::DigitalConfirmPowerHold) {
+    const int8_t confirm = BoardConfig::ACTIVE.input.confirm;
+    if (isDigitalPressed(confirm) || (confirm < 0 && isPowerButtonPhysicallyPressed())) contacts |= 1u << BTN_CONFIRM;
+  }
+  if (style == BoardConfig::InputStyle::DigitalTwoButton) {
+    if (isDigitalPressed(BoardConfig::ACTIVE.input.up)) contacts |= 1u << BTN_UP;
+    if (isDigitalPressed(BoardConfig::ACTIVE.input.down)) contacts |= 1u << BTN_DOWN;
+  }
+#if FREEINK_CAP_TOUCH
+  if (touchPressed || touchHomeKeyDown) contacts |= 1u << 9;
+#endif
+  return contacts;
+}
+
+bool InputManager::rawContactActive() const {
+  if (isAsyncActive()) return _rawContacts.load(std::memory_order_relaxed) != 0;
+  uint32_t adcReadings = noAdcReading;
+  uint8_t buttons = samplePhysicalButtons(&adcReadings);
+  if (s_buttonHook) buttons |= s_buttonHook();
+  return contactMask(buttons, adcReadings) != 0;
+}
+
+uint32_t InputManager::pressSequence() const { return _pressSequence.load(std::memory_order_relaxed); }
 
 InputManager::ButtonHook InputManager::s_buttonHook = nullptr;
 
@@ -309,28 +351,82 @@ bool InputManager::prepareForDeepSleep() {
   return true;
 }
 
-void InputManager::beginAsync(const uint8_t taskPriority, const uint32_t pollMs, const uint8_t queueLen) {
-  if (_asyncTask) return;  // already running
-  _asyncPollMs = pollMs;
+bool InputManager::beginAsync(uint32_t pollIntervalMs) {
+  if (isAsyncActive()) return true;
+  constexpr uint8_t queueLen = 32;
+  _asyncPollMs = pollIntervalMs;
+  _asyncButtonFrames = xQueueCreate(1, sizeof(AsyncButtonFrame));
+  if (!_asyncButtonFrames) return false;
+
   _asyncQueue = xQueueCreate(queueLen, sizeof(uint8_t));
-  if (!_asyncQueue) return;
+#if FREEINK_CAP_TOUCH
   _asyncTapQueue = xQueueCreate(queueLen, sizeof(float) * 2);
   _asyncSwipeQueue = xQueueCreate(queueLen, sizeof(float) * 4);
   _asyncMultiTouchSwipeQueue = xQueueCreate(queueLen, sizeof(QueuedMultiTouchSwipe));
   _asyncMultiTouchRotationQueue = xQueueCreate(queueLen, sizeof(QueuedMultiTouchRotation));
   _asyncMultiTouchPinchQueue = xQueueCreate(queueLen, sizeof(QueuedMultiTouchPinch));
-  xTaskCreate(asyncTaskTrampoline, "fi_input", 4096, this, taskPriority, &_asyncTask);
+#endif
+  if (_asyncQueue) {
+    snapshotButtons(_asyncFrame);
+    _asyncActive.store(true, std::memory_order_release);
+    if (xTaskCreate(asyncTaskTrampoline, "fi_input", 4096, this, 2, nullptr) == pdTRUE) return true;
+    _asyncActive.store(false, std::memory_order_release);
+  }
+
+#if defined(ESP_PLATFORM)
+  QueueHandle_t* queues[] = {&_asyncButtonFrames, &_asyncQueue,
+#if FREEINK_CAP_TOUCH
+                             &_asyncTapQueue, &_asyncSwipeQueue, &_asyncMultiTouchSwipeQueue,
+                             &_asyncMultiTouchRotationQueue, &_asyncMultiTouchPinchQueue,
+#endif
+  };
+  for (auto* queue : queues) {
+    if (*queue) vQueueDelete(*queue);
+    *queue = nullptr;
+  }
+#endif
+  return false;
 }
+
+bool InputManager::isAsyncActive() const { return _asyncActive.load(std::memory_order_acquire); }
 
 void InputManager::asyncTaskTrampoline(void* self) { static_cast<InputManager*>(self)->asyncPoll(); }
 
+void InputManager::snapshotButtons(AsyncButtonFrame& frame) const {
+  frame.state = currentState;
+  frame.holdTime = currentState ? buttonPressStart : buttonPressFinish - buttonPressStart;
+  frame.powerHoldTime =
+      (currentState & (1u << BTN_POWER)) ? powerButtonPressStart : powerButtonPressFinish - powerButtonPressStart;
+#if FREEINK_DEVICE_PAPERMONO
+  frame.powerClick = powerButtonClick;
+#endif
+  frame.debouncePending = lastState != currentState;
+  frame.toggleOn = toggleSwitchOn;
+}
+
 void InputManager::asyncPoll() {
-  static const uint8_t kButtons[] = {BTN_BACK, BTN_CONFIRM, BTN_LEFT, BTN_RIGHT, BTN_UP, BTN_DOWN, BTN_POWER};
+  AsyncButtonFrame frame;
+  const auto normalTicks = std::max<decltype(pdMS_TO_TICKS(0))>(1, pdMS_TO_TICKS(_asyncPollMs));
+  const auto confirmTicks = std::max<decltype(pdMS_TO_TICKS(0))>(1, pdMS_TO_TICKS(LADDER_PRESS_CONFIRM_MS));
   for (;;) {
-    update();
-    for (const uint8_t b : kButtons) {
-      if (wasPressed(b)) xQueueSend(_asyncQueue, &b, 0);
+    pollInput();
+    for (uint8_t button = 0; button < BUTTON_COUNT; ++button) {
+      const uint8_t mask = 1u << button;
+      if (pressedEvents & mask) {
+        ++frame.pressed[button];
+        xQueueSend(_asyncQueue, &button, 0);
+      }
+      if (releasedEvents & mask) ++frame.released[button];
     }
+    snapshotButtons(frame);
+#if defined(xQueueOverwrite)
+    xQueueOverwrite(_asyncButtonFrames, &frame);
+#else
+    AsyncButtonFrame previous;
+    xQueueReceive(_asyncButtonFrames, &previous, 0);
+    xQueueSend(_asyncButtonFrames, &frame, 0);
+#endif
+#if FREEINK_CAP_TOUCH
     float tap[2];
     if (_asyncTapQueue && wasTouchTap(tap[0], tap[1])) {
       xQueueSend(_asyncTapQueue, tap, 0);
@@ -355,7 +451,10 @@ void InputManager::asyncPoll() {
                                            multiTouchPinchDurationMs};
       xQueueSend(_asyncMultiTouchPinchQueue, &pinch, 0);
     }
-    vTaskDelay(pdMS_TO_TICKS(_asyncPollMs));
+#endif
+    const bool confirmLadderPress = BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::XteinkAdcLadder &&
+                                    (lastState & ~currentState & ladderMask);
+    vTaskDelay(confirmLadderPress ? std::min(normalTicks, confirmTicks) : normalTicks);
   }
 }
 
@@ -364,16 +463,21 @@ bool InputManager::popPress(uint8_t& button) {
   return xQueueReceive(_asyncQueue, &button, 0) == pdTRUE;
 }
 
-bool InputManager::popTouchTap(float& nx, float& ny) {
+bool InputManager::popTouchTap([[maybe_unused]] float& nx, [[maybe_unused]] float& ny) {
+#if FREEINK_CAP_TOUCH
   if (!_asyncTapQueue) return false;
   float tap[2];
   if (xQueueReceive(_asyncTapQueue, tap, 0) != pdTRUE) return false;
   nx = tap[0];
   ny = tap[1];
   return true;
+#else
+  return false;
+#endif
 }
 
-bool InputManager::popSwipe(float& nxStart, float& nyStart, float& nxEnd, float& nyEnd) {
+bool InputManager::popSwipe([[maybe_unused]] float& nxStart, [[maybe_unused]] float& nyStart, [[maybe_unused]] float& nxEnd, [[maybe_unused]] float& nyEnd) {
+#if FREEINK_CAP_TOUCH
   if (!_asyncSwipeQueue) return false;
   float swipe[4];
   if (xQueueReceive(_asyncSwipeQueue, swipe, 0) != pdTRUE) return false;
@@ -382,10 +486,15 @@ bool InputManager::popSwipe(float& nxStart, float& nyStart, float& nxEnd, float&
   nxEnd = swipe[2];
   nyEnd = swipe[3];
   return true;
+#else
+  return false;
+#endif
 }
 
-bool InputManager::popMultiTouchSwipe(uint8_t& contactCount, float& nxStart, float& nyStart, float& nxEnd, float& nyEnd,
-                                      unsigned long& durationMs) {
+bool InputManager::popMultiTouchSwipe([[maybe_unused]] uint8_t& contactCount, [[maybe_unused]] float& nxStart,
+                                     [[maybe_unused]] float& nyStart, [[maybe_unused]] float& nxEnd,
+                                     [[maybe_unused]] float& nyEnd, [[maybe_unused]] unsigned long& durationMs) {
+#if FREEINK_CAP_TOUCH
   if (!_asyncMultiTouchSwipeQueue) return false;
   QueuedMultiTouchSwipe swipe{};
   if (xQueueReceive(_asyncMultiTouchSwipeQueue, &swipe, 0) != pdTRUE) return false;
@@ -394,9 +503,14 @@ bool InputManager::popMultiTouchSwipe(uint8_t& contactCount, float& nxStart, flo
   normalizeTouchPoint(swipe.endX, swipe.endY, nxEnd, nyEnd);
   durationMs = swipe.durationMs;
   return true;
+#else
+  return false;
+#endif
 }
 
-bool InputManager::popMultiTouchRotation(float& degrees, float& nxCenter, float& nyCenter, unsigned long& durationMs) {
+bool InputManager::popMultiTouchRotation([[maybe_unused]] float& degrees, [[maybe_unused]] float& nxCenter,
+                                        [[maybe_unused]] float& nyCenter, [[maybe_unused]] unsigned long& durationMs) {
+#if FREEINK_CAP_TOUCH
   if (!_asyncMultiTouchRotationQueue) return false;
   QueuedMultiTouchRotation rotation{};
   if (xQueueReceive(_asyncMultiTouchRotationQueue, &rotation, 0) != pdTRUE) return false;
@@ -404,9 +518,14 @@ bool InputManager::popMultiTouchRotation(float& degrees, float& nxCenter, float&
   normalizeTouchPoint(rotation.centerX, rotation.centerY, nxCenter, nyCenter);
   durationMs = rotation.durationMs;
   return true;
+#else
+  return false;
+#endif
 }
 
-bool InputManager::popMultiTouchPinch(float& scale, float& nxCenter, float& nyCenter, unsigned long& durationMs) {
+bool InputManager::popMultiTouchPinch([[maybe_unused]] float& scale, [[maybe_unused]] float& nxCenter,
+                                     [[maybe_unused]] float& nyCenter, [[maybe_unused]] unsigned long& durationMs) {
+#if FREEINK_CAP_TOUCH
   if (!_asyncMultiTouchPinchQueue) return false;
   QueuedMultiTouchPinch pinch{};
   if (xQueueReceive(_asyncMultiTouchPinchQueue, &pinch, 0) != pdTRUE) return false;
@@ -414,6 +533,9 @@ bool InputManager::popMultiTouchPinch(float& scale, float& nxCenter, float& nyCe
   normalizeTouchPoint(pinch.centerX, pinch.centerY, nxCenter, nyCenter);
   durationMs = pinch.durationMs;
   return true;
+#else
+  return false;
+#endif
 }
 
 bool InputManager::isDigitalPressed(const int8_t pin) const { return pin >= 0 && digitalRead(pin) == LOW; }
@@ -574,7 +696,7 @@ void InputManager::updateDigitalTwoButton(const unsigned long currentTime) {
   if (pmicClicked) {
     auxiliaryState |= static_cast<uint8_t>(1u << BTN_POWER);
   }
-  if ((auxiliaryState & (1u << BTN_POWER)) && !isPressed(BTN_POWER)) powerButtonClick = pmicClicked;
+  if ((auxiliaryState & (1u << BTN_POWER)) && !(currentState & (1u << BTN_POWER))) powerButtonClick = pmicClicked;
 #endif
 
   if (physical != twoButtonPhysicalState) {
@@ -620,6 +742,28 @@ void InputManager::updateDigitalTwoButton(const unsigned long currentTime) {
 }
 
 void InputManager::update() {
+  if (!isAsyncActive()) {
+    pollInput();
+    return;
+  }
+
+  AsyncButtonFrame frame;
+  if (xQueueReceive(_asyncButtonFrames, &frame, 0) != pdTRUE) {
+    std::fill_n(_asyncPressed, BUTTON_COUNT, 0);
+    std::fill_n(_asyncReleased, BUTTON_COUNT, 0);
+    return;
+  }
+
+  for (uint8_t button = 0; button < BUTTON_COUNT; ++button) {
+    const uint32_t presses = frame.pressed[button] - _asyncFrame.pressed[button];
+    const uint32_t releases = frame.released[button] - _asyncFrame.released[button];
+    _asyncPressed[button] = std::min<uint32_t>(UINT8_MAX, presses);
+    _asyncReleased[button] = std::min<uint32_t>(UINT8_MAX, releases);
+  }
+  _asyncFrame = frame;
+}
+
+void InputManager::pollInput() {
   const unsigned long currentTime = millis();
 
   pressedEvents = 0;
@@ -635,32 +779,63 @@ void InputManager::update() {
   touchHomeKeyLongEvent = false;
   updateToggleSwitch(currentTime);
 
-  if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalConfirmBackHold) {
-    updateConfirmBackHold(currentTime);
-    return;
+  uint32_t adcReadings = noAdcReading;
+  const uint8_t buttons = updateButtons(currentTime, adcReadings);
+  if (adcReadings != noAdcReading && isAsyncActive()) {
+    _asyncAdc.store(adcReadings, std::memory_order_relaxed);
   }
-  if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalConfirmPowerHold) {
-    updateConfirmPowerHold(currentTime);
-    return;
+  const uint16_t contacts = contactMask(buttons, adcReadings);
+  const uint16_t previous = _rawContacts.load(std::memory_order_relaxed);
+  const unsigned newPresses = (contacts & ~previous) | (pressedEvents & ~(contacts | previous));
+  if (newPresses) {
+    const uint32_t sequence = _pressSequence.load(std::memory_order_relaxed);
+    _pressSequence.store(sequence + __builtin_popcount(newPresses), std::memory_order_relaxed);
   }
-  if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalTwoButton) {
-    updateDigitalTwoButton(currentTime);
-    return;
+  _rawContacts.store(contacts, std::memory_order_relaxed);
+}
+
+uint8_t InputManager::LadderDebounce::filter(uint8_t raw, uint8_t stable, unsigned long now) {
+  if (!raw) {
+    candidate = 0;
+    if (idlePolls < LADDER_RELEASE_POLLS) ++idlePolls;
+    return idlePolls == LADDER_RELEASE_POLLS ? 0 : stable;
+  }
+  idlePolls = 0;
+  if (raw != candidate) {
+    candidate = raw;
+    candidateSince = now;
+  }
+  return now - candidateSince >= LADDER_PRESS_CONFIRM_MS ? raw : stable;
+}
+
+uint8_t InputManager::updateButtons(unsigned long now, uint32_t& adcReadings) {
+  const auto style = BoardConfig::ACTIVE.inputStyle;
+  switch (style) {
+    case BoardConfig::InputStyle::DigitalConfirmBackHold:
+      updateConfirmBackHold(now);
+      return currentState;
+    case BoardConfig::InputStyle::DigitalConfirmPowerHold:
+      updateConfirmPowerHold(now);
+      return currentState;
+    case BoardConfig::InputStyle::DigitalTwoButton:
+      updateDigitalTwoButton(now);
+      return currentState;
+    default:
+      break;
   }
 
-  const uint8_t state = getState();
-
-  // Debounce
-  if (state != lastState) {
-    lastDebounceTime = currentTime;
-    lastState = state;
+  const uint8_t raw = sampleState(&adcReadings);
+  const uint8_t analogMask = style == BoardConfig::InputStyle::XteinkAdcLadder ? ladderMask : 0;
+  const uint8_t digitalMask = ~analogMask;
+  if ((raw ^ lastState) & digitalMask) lastDebounceTime = now;
+  uint8_t next = (now - lastDebounceTime > DEBOUNCE_DELAY ? raw : currentState) & digitalMask;
+  if (analogMask) {
+    next |= _ladderGroup1.filter(raw & ladderGroup1Mask, currentState & ladderGroup1Mask, now);
+    next |= _ladderGroup2.filter(raw & ladderGroup2Mask, currentState & ladderGroup2Mask, now);
   }
-
-  if ((currentTime - lastDebounceTime) > DEBOUNCE_DELAY) {
-    if (state != currentState) {
-      applyStateChange(state, currentTime);
-    }
-  }
+  if (next != currentState) applyStateChange(next, now);
+  lastState = raw;
+  return raw;
 }
 
 void InputManager::updateToggleSwitch(const unsigned long now) {
@@ -676,7 +851,14 @@ void InputManager::updateToggleSwitch(const unsigned long now) {
   }
 }
 
-bool InputManager::isPressed(const uint8_t buttonIndex) const { return currentState & (1 << buttonIndex); }
+bool InputManager::isPressed(const uint8_t buttonIndex) const {
+  const uint8_t state = isAsyncActive() ? _asyncFrame.state : currentState;
+  return buttonIndex < BUTTON_COUNT && (state & (1u << buttonIndex));
+}
+
+bool InputManager::isDebouncePending() const {
+  return isAsyncActive() ? _asyncFrame.debouncePending : lastState != currentState;
+}
 
 bool InputManager::isPowerButtonPhysicallyPressed() const {
   const int8_t pin = BoardConfig::ACTIVE.input.power;
@@ -685,15 +867,32 @@ bool InputManager::isPowerButtonPhysicallyPressed() const {
   return digitalRead(pin) == activeLevel;
 }
 
-bool InputManager::wasPressed(const uint8_t buttonIndex) const { return pressedEvents & (1 << buttonIndex); }
+bool InputManager::wasPressed(uint8_t buttonIndex) const { return wasPressedCount(buttonIndex) != 0; }
 
-bool InputManager::wasAnyPressed() const { return pressedEvents > 0; }
+uint8_t InputManager::wasPressedCount(uint8_t buttonIndex) const {
+  if (buttonIndex >= BUTTON_COUNT) return 0;
+  return isAsyncActive() ? _asyncPressed[buttonIndex] : (pressedEvents >> buttonIndex) & 1u;
+}
 
-bool InputManager::wasReleased(const uint8_t buttonIndex) const { return releasedEvents & (1 << buttonIndex); }
+bool InputManager::wasAnyPressed() const {
+  if (!isAsyncActive()) return pressedEvents != 0;
+  return std::any_of(_asyncPressed, _asyncPressed + BUTTON_COUNT, [](uint8_t count) { return count != 0; });
+}
 
-bool InputManager::wasAnyReleased() const { return releasedEvents > 0; }
+bool InputManager::wasReleased(uint8_t buttonIndex) const { return wasReleasedCount(buttonIndex) != 0; }
+
+uint8_t InputManager::wasReleasedCount(uint8_t buttonIndex) const {
+  if (buttonIndex >= BUTTON_COUNT) return 0;
+  return isAsyncActive() ? _asyncReleased[buttonIndex] : (releasedEvents >> buttonIndex) & 1u;
+}
+
+bool InputManager::wasAnyReleased() const {
+  if (!isAsyncActive()) return releasedEvents != 0;
+  return std::any_of(_asyncReleased, _asyncReleased + BUTTON_COUNT, [](uint8_t count) { return count != 0; });
+}
 
 unsigned long InputManager::getHeldTime() const {
+  if (isAsyncActive()) return _asyncFrame.state ? millis() - _asyncFrame.holdTime : _asyncFrame.holdTime;
   // Still hold a button
   if (currentState > 0) {
     return millis() - buttonPressStart;
@@ -703,6 +902,13 @@ unsigned long InputManager::getHeldTime() const {
 }
 
 unsigned long InputManager::getPowerButtonHeldTime() const {
+  if (isAsyncActive()) {
+    const auto& frame = _asyncFrame;
+#if FREEINK_DEVICE_PAPERMONO
+    if (frame.powerClick) return 0;
+#endif
+    return (frame.state & (1u << BTN_POWER)) ? millis() - frame.powerHoldTime : frame.powerHoldTime;
+  }
 #if FREEINK_DEVICE_PAPERMONO
   if (powerButtonClick) return 0;
 #endif

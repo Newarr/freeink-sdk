@@ -169,7 +169,7 @@ class FreeInkDisplay {
 
   void displayBuffer(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
   bool canStageNextFrame() const;
-  bool stageNextFrame();
+  bool stageNextFrame(bool (*shouldAbort)(void*) = nullptr, void* abortCtx = nullptr);
   bool triggerStagedFastRefresh(bool turnOffScreen = false);
 
   // Non-blocking refresh: pushes the frame, starts the panel waveform, and

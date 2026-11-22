@@ -99,6 +99,7 @@ void Uc8279Driver::triggerGrayRefresh(EpdBus& bus, bool turnOff) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" 8279_gray_PON");
     _isScreenOn = true;
+    _idlePoweredOff = false;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   bus.waitBusy((_directGrayPass ? " 8279_DIRECT_GRAY_DRF" : " 8279_gray_DRF"));
@@ -116,6 +117,7 @@ void Uc8279Driver::triggerGrayRefresh(EpdBus& bus, bool turnOff) {
 void Uc8279Driver::initController(EpdBus& bus) {
   sendScript(bus, kUc8279X3_Init, sizeof(kUc8279X3_Init));
   _isScreenOn = false;
+  _idlePoweredOff = false;
   _firstRefresh = true;
   _oldPlaneValid = false;
   _stagedNextFrame = false;
@@ -203,16 +205,8 @@ bool Uc8279Driver::displayStart(EpdBus &bus, const uint8_t *fb,
   _directGrayPass = false;
   (void)prev; // single-buffer: DTM1 holds the previous frame from
               // displayFinish()'s sync
-  // GC vs DU is ONLY a waveform-bank choice — BOTH diff the new frame against
-  // the REAL previous frame in DTM1 (the live stock full path FUN_42015786
-  // loads BW_GC and never touches DTM1; BW_GC's WW!=KW / WK!=KK, so it clears
-  // via the true old->new transition, not a white baseline). Forcing DTM1 white
-  // made a black splash pixel that is white in home read old==new==white -> WW
-  // -> no drive -> the splash ghosted through. Use GC (strong clear) for
-  // Full/Half, the first paint, a forced resync, and while the boot
-  // initial-full budget is unspent (so the first content screen after boot is a
-  // real clear, since CrossPoint paints home with FAST); DU only for a Fast
-  // request with a baseline.
+  // The GC waveform needs the previous frame to clear transitions from
+  // the splash screen to the home screen (stock FUN_42015786).
   const bool useGc = (mode != RefreshMode::Fast) || !_oldPlaneValid ||
                      _forceFullSyncNext || _initialFullsRemaining > 0;
 
@@ -229,6 +223,7 @@ bool Uc8279Driver::displayStart(EpdBus &bus, const uint8_t *fb,
       bus.cmd(CMD_POWER_ON);
       bus.waitBusy(" 8279_PON");
       _isScreenOn = true;
+      _idlePoweredOff = false;
     }
     bus.cmd(CMD_DISPLAY_REFRESH);
     bus.waitBusy(" 8279_BW_TARGET_DRF");
@@ -239,7 +234,8 @@ bool Uc8279Driver::displayStart(EpdBus &bus, const uint8_t *fb,
   _pendingTrackerUpdated = false;
   uint16_t minBx = 0, maxBx = 0, minY = 0, maxY = 0;
   bool usePartial = false;
-  if (!useGc && _isScreenOn && !_firstRefresh && _oldPlaneValid && !paintDestination && !_inGrayscaleMode &&
+  const bool darkDu = _darkBackground && !useGc;
+  if (!useGc && !darkDu && _isScreenOn && !_firstRefresh && _oldPlaneValid && !paintDestination && !_inGrayscaleMode &&
       !_lsbValid && !_dtm2DirtyFromStage) {
     usePartial = _dirtyTracker.diffAndUpdate(fb, _h, _wb, 65, minBx, maxBx, minY, maxY);
     _pendingTrackerUpdated = _dirtyTracker.valid();
@@ -271,10 +267,10 @@ bool Uc8279Driver::displayStart(EpdBus &bus, const uint8_t *fb,
     // partial refresh cannot leave PTL narrowed for a full-panel write.
     grayWindowIn(bus);
 
-    // KW planes: OLD (0x10) + NEW (0x13). Seed OLD white ONLY on the first paint
-    // (no previous frame exists yet); every later refresh diffs against the OLD
-    // plane synced to the last displayed frame in displayFinish().
-    if (!_oldPlaneValid) {
+    if (darkDu) {
+      bus.sendPlaneFlippedInverted(CMD_DTM1, fb, _h, _wb);
+      bus.cmd(CMD_DATA_STOP);
+    } else if (!_oldPlaneValid) {
       bus.fillPlane(CMD_DTM1, 0xFF, _h, _wb);
       bus.cmd(CMD_DATA_STOP);
     }
@@ -295,6 +291,7 @@ bool Uc8279Driver::displayStart(EpdBus &bus, const uint8_t *fb,
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" 8279_PON");
     _isScreenOn = true;
+    _idlePoweredOff = false;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform started (BUSY_N dropped LOW) before returning so
@@ -364,36 +361,53 @@ void Uc8279Driver::skipInitialResync() {
   _initialFullsRemaining = 0;  // ...so don't force the boot clears
 }
 
+void Uc8279Driver::controllerIdle(EpdBus& bus) {
+  if (!_isScreenOn || _pendingRefresh) return;
+  bus.cmd(CMD_POWER_OFF);
+  bus.waitBusy(" 8279_POF");
+  _isScreenOn = false;
+  _idlePoweredOff = true;
+}
+
 bool Uc8279Driver::canStageNextFrame() const {
   return _isScreenOn && !_firstRefresh && _oldPlaneValid && !_inGrayscaleMode && !_directGrayOnPanel &&
          !_directGrayPass && !_forceFullSyncNext && _initialFullsRemaining == 0 && !_lsbValid && !_pendingRefresh;
 }
 
-bool Uc8279Driver::stageNextFrame(EpdBus& bus, const uint8_t* fb) {
-  if (!fb || !canStageNextFrame()) {
-    _stagedNextFrame = false;
-    return false;
-  }
+bool Uc8279Driver::stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*), void* abortCtx) {
+  _stagedNextFrame = false;
+  if (!fb || !canStageNextFrame()) return false;
   grayWindowIn(bus);
-  bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
-  bus.cmd(CMD_DATA_STOP);
-  bus.cmd(CMD_VCOM_DATA_INTERVAL);
-  bus.data(kUc8279X3_CdiLater);
-  loadBank(bus, kUc8279X3_BwDu);
-  bus.cmd(CMD_PARTIAL_OUT);
-  _stagedNextFrame = true;
   _dtm2DirtyFromStage = true;
-  return true;
+  const bool completed = writeStagedPlane(bus, CMD_DTM2, fb, _h, _wb, shouldAbort, abortCtx);
+  bus.cmd(CMD_DATA_STOP);
+  if (completed) {
+    bus.cmd(CMD_VCOM_DATA_INTERVAL);
+    bus.data(kUc8279X3_CdiLater);
+    loadBank(bus, kUc8279X3_BwDu);
+  }
+  bus.cmd(CMD_PARTIAL_OUT);
+  _stagedNextFrame = completed;
+  return completed;
 }
 
 bool Uc8279Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
-  if (!_stagedNextFrame || !fb || !canStageNextFrame()) {
+  if (!_stagedNextFrame || !fb || (!_idlePoweredOff && !canStageNextFrame())) {
     _stagedNextFrame = false;
     return false;
   }
   _stagedNextFrame = false;
-  // DTM2, BW_DU LUT, CDI, and PON rails are already resident: enter full PTL and fire DRF.
   grayWindowIn(bus);
+  if (_darkBackground) {
+    bus.sendPlaneFlippedInverted(CMD_DTM1, fb, _h, _wb);
+    bus.cmd(CMD_DATA_STOP);
+  }
+  if (!_isScreenOn) {
+    bus.cmd(CMD_POWER_ON);
+    bus.waitBusy(" 8279_PON");
+    _isScreenOn = true;
+    _idlePoweredOff = false;
+  }
   bus.cmd(CMD_DISPLAY_REFRESH);
   bus.waitBusy(" 8279_STAGED_DRF");
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
@@ -414,6 +428,7 @@ bool Uc8279Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool
 }
 
 void Uc8279Driver::deepSleep(EpdBus& bus) {
+  _idlePoweredOff = false;
   _stagedNextFrame = false;
   _dtm2DirtyFromStage = false;
   _pendingPartialWin = false;

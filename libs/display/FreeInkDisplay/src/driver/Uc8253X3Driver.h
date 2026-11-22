@@ -86,8 +86,10 @@ class Uc8253X3Driver : public PanelDriver {
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
 
+  void controllerIdle(EpdBus& bus) override;
   bool canStageNextFrame() const override;
-  bool stageNextFrame(EpdBus& bus, const uint8_t* fb) override;
+  bool stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*) = nullptr,
+                      void* abortCtx = nullptr) override;
   bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) override;
 
 private:
@@ -110,6 +112,7 @@ private:
   uint32_t _bufferSize;
 
   bool _isScreenOn = false;
+  bool _idlePoweredOff = false;
   bool _redRamSynced = false;
   bool _inGrayscaleMode = false;
   bool _absoluteInput = false;

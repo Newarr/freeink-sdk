@@ -115,6 +115,7 @@ class DisplayPmLock {
 class DisplayPmLock {
  public:
   DisplayPmLock() = default;
+  ~DisplayPmLock() {}
   DisplayPmLock(const DisplayPmLock&) = delete;
   DisplayPmLock& operator=(const DisplayPmLock&) = delete;
 };
@@ -742,26 +743,27 @@ bool FreeInkDisplay::canStageNextFrame() const {
          _driver->canStageNextFrame();
 }
 
-bool FreeInkDisplay::stageNextFrame() {
+bool FreeInkDisplay::stageNextFrame(bool (*shouldAbort)(void*), void* abortCtx) {
   if (!canStageNextFrame()) return false;
   DisplayPmLock pmLock;
   syncPendingAsync();
   if (_inverted) invertBytes(frameBuffer, bufferSize);
-  const bool ok = _driver->stageNextFrame(_bus, frameBuffer);
+  const bool ok = _driver->stageNextFrame(_bus, frameBuffer, shouldAbort, abortCtx);
   if (_inverted) invertBytes(frameBuffer, bufferSize);
   return ok;
 }
 
 bool FreeInkDisplay::triggerStagedFastRefresh(bool turnOffScreen) {
-  if (!canStageNextFrame()) return false;
-  cancelGrayscalePass();
-  _grayPassFailed = false;
+  if (!_driver || _inversionDirty || _refreshPending || !frameBuffer || _grayscaleMode != GrayscaleMode::Overlay) {
+    return false;
+  }
   DisplayPmLock pmLock;
   syncPendingAsync();
   if (_inverted) invertBytes(frameBuffer, bufferSize);
   const bool ok = _driver->triggerStagedFastRefresh(_bus, frameBuffer, turnOffScreen);
   if (_inverted) invertBytes(frameBuffer, bufferSize);
   if (ok) {
+    _grayPassFailed = false;
     _shadowValid = false;
     _inversionDirty = false;
   }
