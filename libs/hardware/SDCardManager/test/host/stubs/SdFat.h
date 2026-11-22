@@ -20,6 +20,10 @@ class FsBlockDeviceInterface {
   virtual bool writeSectors(Sector_t, const uint8_t*, size_t) { return false; }
   virtual Sector_t sectorCount() { return 1024; }
   virtual bool syncDevice() { return true; }
+  virtual bool readOCR(uint32_t* ocr) {
+    if (ocr) *ocr = 0x80000000u;
+    return true;
+  }
 };
 
 namespace fakeSd {

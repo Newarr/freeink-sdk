@@ -455,7 +455,7 @@ bool gaugeActive() {
   return cw2015State.present;
 }
 
-// SoC (0..100) from the active gauge, dispatched by type. false on I2C failure.
+// SoC (0..100) from the active gauge. False if the reading fails or is out of range.
 bool readGaugeSoc(uint16_t& out) {
   const auto& g = BoardConfig::ACTIVE.batteryGauge;
 #if FREEINK_DEVICE_WS397
@@ -498,8 +498,8 @@ bool readGaugeSoc(uint16_t& out) {
     return true;
   }
   uint16_t soc = 0;
-  if (!readReg16(g.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc)) return false;
-  out = soc > 100 ? 100 : soc;
+  if (!readReg16(g.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc) || soc > 100) return false;
+  out = soc;
   return true;
 }
 

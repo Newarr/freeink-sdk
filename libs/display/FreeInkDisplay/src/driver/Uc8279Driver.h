@@ -12,20 +12,18 @@
 // the panel with no drive rails and leaves it completely dark — the failure
 // seen on the first UC8279d field units.
 //
-// The entire register recipe and every waveform bank were reverse-engineered
-// from the stock X3 firmware (update.bin) and live in lut/Uc8279X3Luts.h:
+// The init script and stock waveform banks come from the X3 firmware.
+// The custom DU bank lives alongside them in lut/Uc8279X3Luts.h.
 //   - kUc8279X3_Init  : PSR 3F 4A, PTL 792x528 window, PFS 20,
 //                       PWR 43 00 78 78 17, VDCS 24, BTST 25 25 3C, PLL 0F, E1 02
 //   - kUc8279X3_BwGc  : B/W full (GC) waveform  (5 x 43, command-prefixed)
 //   - kUc8279X3_BwDu  : B/W fast (DU) waveform  (5 x 43, command-prefixed)
-//   - CDI 0x97 first refresh / 0xD7 later; DU adds E0=02, E5=5A.
+//   - CDI 0x97 first refresh / 0xD7 later. AA preconditioning writes E0 and E5.
 // XTF_AA / XTH4 banks supply overlay and absolute grayscale respectively.
 //
 // BUSY_N: low while busy (PON/DRF/POF all flag), same two-phase shape as the
 // UC8253 X3 — reuses BusyPolarity::X3TwoPhase and the async start/finish split.
 
-
-#include "FrameDirtyTracker.h"
 #include "PanelDriver.h"
 
 namespace freeink {
@@ -43,8 +41,6 @@ class Uc8279Driver : public PanelDriver {
   void deepSleep(EpdBus& bus) override;
 
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
-  void displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y, uint16_t w,
-                     uint16_t h, bool turnOff) override;
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   bool supportsAsyncDisplay() const override { return true; }
@@ -57,7 +53,8 @@ class Uc8279Driver : public PanelDriver {
   bool canStageNextFrame() const override;
   bool stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*) = nullptr,
                       void* abortCtx = nullptr) override;
-  bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) override;
+  void invalidateStagedFrame() override;
+  bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb) override;
 
   // --- 4-level grayscale / anti-aliasing (mirrors the UC8253 X3 sibling) ---
   // Two 1bpp planes (LSB -> DTM1/old, MSB -> DTM2/new) encode 4 levels; the
@@ -100,15 +97,8 @@ class Uc8279Driver : public PanelDriver {
   void loadRawBank(EpdBus& bus, const uint8_t (*bank)[49]);
   // Blocking PON -> DRF -> wait (-> POF) used by the grayscale paths.
   void triggerGrayRefresh(EpdBus& bus, bool turnOff);
-  // Enter the full 792x528 PTL partial window (PTIN + PTL). ALL RAM plane writes
-  // and refreshes must run in this window: normal mode addresses the controller's
-  // 800x600 frame (100-byte rows) and misaligns our 99-byte-row planes. The B/W
-  // path is implicitly windowed (init leaves this PTL set + displayStart's PTIN);
-  // the grayscale methods must re-assert it explicitly.
+  // The full PTL window keeps RAM writes on 99-byte rows. Normal mode uses 100-byte rows.
   void grayWindowIn(EpdBus& bus);
-  void sendSubPlaneFlipped(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, uint16_t xByteStart, uint16_t xByteEnd,
-                           uint16_t yStart, uint16_t yEnd);
-
   uint16_t _w;   // visible width  (792)
   uint16_t _h;   // visible height (528)
   uint16_t _wb;  // width in bytes (99)
@@ -133,20 +123,12 @@ class Uc8279Driver : public PanelDriver {
   bool _directGrayPass = false;
   bool _directGrayOnPanel = false;
 
-  // Async split state (see Uc8253X3Driver for the contract).
   bool _pendingRefresh = false;
+  bool _pendingSawBusyLow = false;
   bool _pendingTurnOff = false;
   bool _pendingUsedGc = false;  // this refresh ran the GC bank (spends the budget)
-  bool _stagedNextFrame = false;
-  bool _dtm2DirtyFromStage = false;
-  bool _pendingTrackerUpdated = false;
+  StagedFrame _stagedFrame = StagedFrame::None;
   const uint8_t (*_loadedBank)[43] = nullptr;
-  bool _pendingPartialWin = false;
-  uint16_t _pendingWinBx0 = 0;
-  uint16_t _pendingWinBx1 = 0;
-  uint16_t _pendingWinY0 = 0;
-  uint16_t _pendingWinY1 = 0;
-  FrameDirtyTracker _dirtyTracker;
 };
 
 PanelDriver& uc8279Driver();

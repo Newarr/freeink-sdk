@@ -122,6 +122,13 @@ bool SDCardManager::shutdown() {
   cachedUsedBytesValid = false;
   return true;
 }
+
+bool SDCardManager::isCardResponsive() { return initialized; }
+
+bool SDCardManager::reinit() {
+  shutdown();
+  return begin();
+}
 #else
 SDCardManager::SDCardManager() : sd() {}
 
@@ -286,6 +293,22 @@ FsBlockDeviceInterface* SDCardManager::rawBlockDevice() { return nullptr; }
 FsBlockDeviceInterface* SDCardManager::detachFilesystemForRawAccess() { return nullptr; }
 
 #endif  // USE_BLOCK_DEVICE_INTERFACE || HAS_SDIO_CLASS
+
+bool SDCardManager::isCardResponsive() {
+  if (!initialized) return false;
+  auto* const card = sd.card();
+  uint32_t ocr = 0;
+  return card != nullptr && card->readOCR(&ocr) && (ocr & 0x80000000u) != 0;
+}
+
+bool SDCardManager::reinit() {
+  sd.end();
+  initialized = false;
+  cachedTotalBytes = 0;
+  cachedUsedBytes = 0;
+  cachedUsedBytesValid = false;
+  return begin();
+}
 #endif  // FREEINK_SD_SDMMC
 
 bool SDCardManager::syncFilesystem() {

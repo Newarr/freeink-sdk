@@ -480,6 +480,7 @@ void FreeInkDisplay::releaseBuffers() {
 #endif
   if (_buildLent) return;  // the borrower still holds frameBuffer0; returnBuildStorage() first
   syncPendingAsync();  // a refresh in flight was fed from these buffers
+  if (_driver) _driver->invalidateStagedFrame();
   free(frameBuffer0);
   frameBuffer0 = nullptr;
   frameBuffer = nullptr;
@@ -502,6 +503,7 @@ bool FreeInkDisplay::reallocBuffers() {
   if (_secondaryLent) return false;
 #endif
   if (_buildLent) return false;  // would memset the borrower's scratch
+  if (_driver) _driver->invalidateStagedFrame();
   if (!frameBuffer0) frameBuffer0 = allocFrameBufferStorage();
   if (!frameBuffer0) return false;
   frameBuffer = frameBuffer0;
@@ -521,6 +523,7 @@ uint8_t* FreeInkDisplay::lendBuildStorage(uint32_t* sizeOut) {
     return nullptr;
   }
   syncPendingAsync();  // a refresh in flight was reading these bytes
+  if (_driver) _driver->invalidateStagedFrame();
   _buildLent = true;
   frameBuffer = nullptr;                          // rendering is unavailable while the bytes are lent
   _shadowValid = false;                           // controller baseline no longer matches
@@ -753,16 +756,19 @@ bool FreeInkDisplay::stageNextFrame(bool (*shouldAbort)(void*), void* abortCtx) 
   return ok;
 }
 
-bool FreeInkDisplay::triggerStagedFastRefresh(bool turnOffScreen) {
+bool FreeInkDisplay::triggerStagedFastRefresh() {
   if (!_driver || _inversionDirty || _refreshPending || !frameBuffer || _grayscaleMode != GrayscaleMode::Overlay) {
     return false;
   }
   DisplayPmLock pmLock;
   syncPendingAsync();
   if (_inverted) invertBytes(frameBuffer, bufferSize);
-  const bool ok = _driver->triggerStagedFastRefresh(_bus, frameBuffer, turnOffScreen);
+  const bool ok = _driver->triggerStagedFastRefresh(_bus, frameBuffer);
   if (_inverted) invertBytes(frameBuffer, bufferSize);
   if (ok) {
+#ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
+    swapBuffers();
+#endif
     _grayPassFailed = false;
     _shadowValid = false;
     _inversionDirty = false;

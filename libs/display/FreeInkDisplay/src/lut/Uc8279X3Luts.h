@@ -2,7 +2,7 @@
 
 // UC8279d X3 (792x528, panel "ZHX368", LUT_VER 0x66) waveform banks.
 //
-// Reverse-engineered from the stock Xteink X3 firmware (update.bin,
+// The stock banks come from the Xteink X3 firmware (update.bin,
 // arduino-lib-builder, Jul 3 2026) — descriptor set "ZHX368_8279" at DROM
 // 0x3c25a5e0. These UC8279d modules ship a BLANK MTP (address 0x000 != 0xA5,
 // no factory Command Default Setting, no per-temperature LUTs), so the host
@@ -77,8 +77,8 @@ inline const uint8_t kUc8279X3_BwGc[5][43] = {
     {0x24, 0x01, 0x9A, 0x5A, 0x01, 0x00, 0x01, 0x01},
 };
 
-// --- B/W DU (x3fast crisp partial: 15 frames @ 200 Hz = 75 ms) : 5 x 43 ---
-// 14 active symmetric frames (4+1+5+4 = 70 ms) + 1-frame WW top-up + 1 settle frame.
+// Custom B/W DU. Fourteen transition frames and one idle settle frame at 200 Hz.
+// The one-frame WW pulse coincides with the second transition phase.
 inline const uint8_t kUc8279X3_BwDu[5][43] = {
     {0x20, 0x01, 0x04, 0x01, 0x05, 0x04, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01},
     {0x21, 0x01, 0x04, 0x81, 0x05, 0x04, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01},

@@ -202,9 +202,6 @@ void PowerManager::deepSleep() {
 
 void PowerManager::deepSleepUntilPowerButton() {
   waitForPowerButtonRelease();
-#if FREEINK_MCU_C3
-  isolateSleepGpios();
-#endif
   armPowerButtonWakeup();
   deepSleep();
 }

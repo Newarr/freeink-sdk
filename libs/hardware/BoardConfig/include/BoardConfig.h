@@ -1083,7 +1083,7 @@ constexpr BoardProfile XTEINK_X3 = {
     792,
     528,
     {8, 10, 21, 4, 5, 6, PIN_UNASSIGNED},
-    20000000u,  // displaySpiHz: 20 MHz (UC8253 rated max; cuts X3 plane upload 42ms -> 21ms)
+    10000000u,
     // powerEnable=GPIO13 = the X3 SD-rail power switch (active-high; HIGH at boot
     // powers the card, the sleep path drives it LOW). Confirmed by X3 factory-firmware
     // RE: setup() does digitalWrite(13,HIGH); every deep-sleep does digitalWrite(13,LOW).
@@ -1112,8 +1112,7 @@ constexpr BoardProfile XTEINK_X3 = {
 // TFT-module UltraChip BWR part driven in KW mode) on the same board, glass and
 // pinout. Everything except the panel controller is inherited from XTEINK_X3;
 // which sibling is running is fingerprinted at boot via the XteinkDetect
-// display-controller probe (UC8279 VER/FLG readback). UC8279 serial write
-// timing is also rated to 20 MHz ("Clock rate up to 20MHz").
+// display-controller probe (UC8279 VER/FLG readback).
 constexpr BoardProfile XTEINK_X3_UC8279 = {
     Board::XteinkX3Uc8279,
     "xteink_x3_uc8279",
@@ -1122,7 +1121,7 @@ constexpr BoardProfile XTEINK_X3_UC8279 = {
     792,
     528,
     {8, 10, 21, 4, 5, 6, PIN_UNASSIGNED},
-    20000000u,  // displaySpiHz: 20 MHz (UC8279d rated max; cuts X3 plane upload 42ms -> 21ms)
+    0,  // Use the UC8279d driver's 20 MHz default.
     {PIN_UNASSIGNED, 7, PIN_UNASSIGNED, 12, 13, false, 0},  // SD powerEnable=GPIO13 (active-high) — see XTEINK_X3
     {0, 1, 2, 3, 4, 5, 3, false},
     0,

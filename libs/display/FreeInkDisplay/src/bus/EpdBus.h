@@ -163,9 +163,9 @@ class EpdBus {
 
   // Like waitBusy(), but sleeps the calling task on a BUSY-edge interrupt and
   // wakes exactly on the completion edge instead of polling every 1 ms. For the
-  // refresh-completion wait: it confirms the waveform is running (short bounded
-  // poll) before arming, so it is safe to call right after firing the refresh.
-  void waitRefreshComplete(const char* tag = nullptr);
+  // refresh-completion wait: it confirms the waveform is running when the
+  // caller has yet to observe BUSY assert.
+  void waitRefreshComplete(const char* tag = nullptr, bool sawAssertion = false);
 
   // Instantaneous BUSY-pin read for non-blocking refresh polling. The UC/X3
   // active-low conventions both terminate HIGH, so LOW reports busy.
@@ -228,6 +228,7 @@ class EpdBus {
   }
 
   void createPmLocks();
+  void waitBusy(BusyPolarity p, const char* tag, bool sawAssertion);
   [[nodiscard]] Transaction transaction();
 
   EpdPins _pins{-1, -1, -1, -1, -1, -1};

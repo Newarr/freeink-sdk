@@ -1,6 +1,8 @@
 #include "Uc8253X3Driver.h"
 
+#include "UltraChipX3Window.h"
 
+#include <Arduino.h>
 #include <BoardConfig.h>
 
 #include "../lut/Uc8253X3Luts.h"
@@ -31,8 +33,6 @@ constexpr uint8_t CMD_RESOLUTION = 0x61;
 constexpr uint8_t CMD_GATE_SOURCE_START = 0x65;
 constexpr uint8_t CMD_VCOM_DC = 0x82;
 constexpr uint8_t CMD_LV_SELECTION = 0xE1;
-constexpr uint8_t CMD_PARTIAL_WINDOW = 0x90;
-constexpr uint8_t CMD_PARTIAL_IN = 0x91;
 constexpr uint8_t CMD_PARTIAL_OUT = 0x92;
 
 }  // namespace
@@ -66,8 +66,7 @@ Uc8253X3Driver::Uc8253X3Driver(const Uc8253X3Config& cfg)
       _bufferSize(static_cast<uint32_t>(BoardConfig::ACTIVE.displayWidth / 8) * BoardConfig::ACTIVE.displayHeight) {}
 
 uint32_t Uc8253X3Driver::spiHz() const {
-  // X3 (UC8253) runs the SPI bus at 16 MHz.
-  return BoardConfig::ACTIVE.displaySpiHz != 0 ? BoardConfig::ACTIVE.displaySpiHz : 16000000;
+  return BoardConfig::ACTIVE.displaySpiHz != 0 ? BoardConfig::ACTIVE.displaySpiHz : 10000000;
 }
 
 PanelGeometry Uc8253X3Driver::geometry() const { return {_w, _h, _wb, _bufferSize}; }
@@ -81,22 +80,21 @@ void Uc8253X3Driver::loadBank(EpdBus& bus, const Uc8253LutBank& bank) {
   _loadedBank = bank;
 }
 
-void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const Uc8253LutBank& bank) {
+void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, const Uc8253LutBank& bank) {
   const bool sameBank = _loadedBank.vcom == bank.vcom && _loadedBank.ww == bank.ww && _loadedBank.bw == bank.bw &&
                         _loadedBank.wb == bank.wb && _loadedBank.bb == bank.bb;
-  if (sameBank && _loadedCdi0 == cdi0 && _loadedCdi1 == cdi1) {
+  if (sameBank && _loadedCdi0 == cdi0) {
     return;
   }
-  bus.cmdData2(CMD_VCOM_DATA_INTERVAL, cdi0, cdi1);
+  bus.cmdData2(CMD_VCOM_DATA_INTERVAL, cdi0, 0x07);
   _loadedCdi0 = cdi0;
-  _loadedCdi1 = cdi1;
   if (!sameBank) {
     loadBank(bus, bank);
   }
 }
 
-void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
-                                    const char *label) {
+void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff, const char* label) {
+  // A powered UC8253 skips the BUSY pulse on PON.
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
@@ -112,67 +110,8 @@ void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
   }
 }
 
-void Uc8253X3Driver::grayWindowIn(EpdBus &bus) {
-  const uint16_t xEnd = _w - 1;
-  const uint16_t yEnd = _h - 1;
-  const uint8_t window[9] = {
-      0, 0, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd),
-      0, 0, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd),
-      1};
-  bus.cmd(CMD_PARTIAL_IN);
-  bus.cmdData(CMD_PARTIAL_WINDOW, window, sizeof(window));
-}
-
-void Uc8253X3Driver::sendSubPlaneFlipped(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, uint16_t xByteStart,
-                                         uint16_t xByteEnd, uint16_t yStart, uint16_t yEnd) {
-  const uint16_t rowLen = static_cast<uint16_t>(xByteEnd - xByteStart + 1);
-  bus.cmd(ramCmd);
-  auto txn = bus.beginTxn();
-  for (int y = static_cast<int>(yEnd); y >= static_cast<int>(yStart); --y) {
-    txn.writeBytes(fb + static_cast<uint32_t>(y) * _wb + xByteStart, rowLen);
-  }
-  txn.end();
-  bus.cmd(CMD_DATA_STOP);
-}
-
-void Uc8253X3Driver::displayPartialSubRect(EpdBus& bus, const uint8_t* fb, uint16_t xByteStart, uint16_t xByteEnd,
-                                           uint16_t yStart, uint16_t yEnd, bool turnOff) {
-  const uint16_t xs = static_cast<uint16_t>(xByteStart * 8u);
-  const uint16_t xe = static_cast<uint16_t>(xByteEnd * 8u + 7u);
-  const uint16_t gateYStart = static_cast<uint16_t>((_h - 1) - yEnd);
-  const uint16_t gateYEnd = static_cast<uint16_t>((_h - 1) - yStart);
-  const uint8_t win[9] = {static_cast<uint8_t>(xs >> 8),
-                          static_cast<uint8_t>(xs & 0xFF),
-                          static_cast<uint8_t>(xe >> 8),
-                          static_cast<uint8_t>(xe & 0xFF),
-                          static_cast<uint8_t>(gateYStart >> 8),
-                          static_cast<uint8_t>(gateYStart & 0xFF),
-                          static_cast<uint8_t>(gateYEnd >> 8),
-                          static_cast<uint8_t>(gateYEnd & 0xFF),
-                          0x01};
-  loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
-  bus.cmd(CMD_PARTIAL_IN);
-  bus.cmdData(CMD_PARTIAL_WINDOW, win, sizeof(win));
-  sendSubPlaneFlipped(bus, CMD_DTM2, fb, xByteStart, xByteEnd, yStart, yEnd);
-  if (!_isScreenOn) {
-    bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" X3_PON");
-    _isScreenOn = true;
-    _idlePoweredOff = false;
-  }
-  bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" X3_PTL_DRF");
-  sendSubPlaneFlipped(bus, CMD_DTM1, fb, xByteStart, xByteEnd, yStart, yEnd);
-  bus.cmd(CMD_PARTIAL_OUT);
-  if (turnOff) {
-    bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" X3_POF");
-    _isScreenOn = false;
-  }
-  _grayState.lsbValid = false;
-  _redRamSynced = true;
-  _forceFullSyncNext = false;
-  _forcedConditionPassesNext = 0;
+void Uc8253X3Driver::grayWindowIn(EpdBus& bus) {
+  enterX3PartialWindow(bus, _w, _h, 0, 0, _w, _h);
 }
 
 void Uc8253X3Driver::initController(EpdBus& bus) {
@@ -218,12 +157,9 @@ void Uc8253X3Driver::initController(EpdBus& bus) {
 
   _isScreenOn = false;
   _idlePoweredOff = false;
-  _stagedNextFrame = false;
-  _dtm2DirtyFromStage = false;
+  _stagedFrame = StagedFrame::None;
   _loadedBank = {};
   _loadedCdi0 = 0;
-  _loadedCdi1 = 0;
-  _dirtyTracker.invalidate();
 }
 
 void Uc8253X3Driver::begin(EpdBus& bus) {
@@ -237,13 +173,12 @@ void Uc8253X3Driver::begin(EpdBus& bus) {
   _absoluteInput = false;
   _directGrayPass = false;
   _directGrayOnPanel = false;
-  _stagedNextFrame = false;
   initController(bus);
 }
 
 void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   (void)prev;
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   const bool leavingDirectGray = _directGrayOnPanel;
   _absoluteInput = false;
   _directGrayPass = false;
@@ -268,24 +203,10 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
   const bool doHalfSync = halfMode && !doFullSync;
   _grayState.lastBaseWasPartial = !doFullSync;
 
-  // Automatic PTL (0x90) dirty-rect fast path for small UI/menu/cursor updates:
-  // streams only the changed sub-rectangle to DTM2 and DTM1 (cuts SPI 5-10x).
-  bool trackerUpdated = false;
-  if (fastMode && !doFullSync && !doHalfSync && _isScreenOn && !leavingDirectGray && !_grayState.lsbValid &&
-      !_dtm2DirtyFromStage) {
-    uint16_t minBx = 0, maxBx = 0, minY = 0, maxY = 0;
-    const bool usePartial = _dirtyTracker.diffAndUpdate(fb, _h, _wb, 65, minBx, maxBx, minY, maxY);
-    trackerUpdated = _dirtyTracker.valid();
-    if (usePartial) {
-      displayPartialSubRect(bus, fb, minBx, maxBx, minY, maxY, turnOff);
-      return;
-    }
-  }
-
   if (leavingDirectGray && doFullSync) {
     // Establish the destination before the full recovery's visible flash.
     // HALF pairs WW==BW and WB==BB, making its drive independent of old RAM.
-    loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
+    loadBankCdi(bus, 0xA9, _cfg.half);
     grayWindowIn(bus);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
     bus.cmd(CMD_PARTIAL_OUT);
@@ -294,35 +215,18 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 
   if (doFullSync) {
     // _full OEM bank from a white DTM1 baseline (no software prev-frame buffer).
-    loadBankCdi(bus, 0x29, 0x07, _cfg.full);
+    loadBankCdi(bus, 0x29, _cfg.full);
     bus.fillPlane(CMD_DTM1, 0xFF, _h, _wb);
     bus.cmd(CMD_DATA_STOP);
-    bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   } else if (doHalfSync) {
     // _half scrub: WW==BW, WB==BB -> drive every pixel to target ignoring DTM1.
-    loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
-    bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
+    loadBankCdi(bus, 0xA9, _cfg.half);
   } else {
     // _fast turbo differential; DTM1 retains the previous frame.
-    loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
-    bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
+    loadBankCdi(bus, 0x29, _cfg.fast);
   }
-
-  // PON only when the rails are down: a redundant PON on a powered UC8253 gives
-  // no BUSY LOW edge, so the X3TwoPhase wait burns its 1000 ms ceiling.
-  if (!_isScreenOn) {
-    bus.cmd(CMD_POWER_ON);
-    bus.waitBusy(" X3_PON");
-    _isScreenOn = true;
-    _idlePoweredOff = false;
-  }
-  bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" X3_DRF");
-  if (turnOff) {
-    bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" X3_POF");
-    _isScreenOn = false;
-  }
+  bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
+  triggerRefresh(bus, turnOff);
 
   if (doFullSync) delay(100);
 
@@ -332,15 +236,9 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
     else if (_initialFullSyncsRemaining == 1) postConditionPasses = 1;
   }
   if (postConditionPasses > 0) {
-    const uint16_t xEnd = static_cast<uint16_t>(_w - 1);
-    const uint16_t yEnd = static_cast<uint16_t>(_h - 1);
-    const uint8_t w[9] = {0x00, 0x00, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd & 0xFF),
-                          0x00, 0x00, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd & 0xFF),
-                          0x01};
-    loadBankCdi(bus, 0xA9, 0x07, _cfg.normal);  // _normal: OEM normal loader CDI 0xA9
+    loadBankCdi(bus, 0xA9, _cfg.normal);  // _normal: OEM normal loader CDI 0xA9
     for (uint8_t i = 0; i < postConditionPasses; i++) {
-      bus.cmd(CMD_PARTIAL_IN);
-      bus.cmdData(CMD_PARTIAL_WINDOW, w, 9);
+      grayWindowIn(bus);
       bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
       bus.cmd(CMD_PARTIAL_OUT);
       triggerRefresh(bus, false);
@@ -360,7 +258,7 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
   // First differential after a full garbles on X3; spend a no-op fast settle of
   // the just-displayed frame so the caller's next diff is clean.
   if (doFullSync) {
-    loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
+    loadBankCdi(bus, 0x29, _cfg.fast);
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
     triggerRefresh(bus, turnOff);
     bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
@@ -372,36 +270,12 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
   }
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
-  _dtm2DirtyFromStage = false;
-  if (!trackerUpdated) {
-    _dirtyTracker.seed(fb, _h, _wb);
-  }
-}
-
-void Uc8253X3Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
-                                   uint16_t w, uint16_t h, bool turnOff) {
-  _stagedNextFrame = false;
-  const bool inBounds = fb && w > 0 && h > 0 && static_cast<uint32_t>(x) + w <= _w &&
-                        static_cast<uint32_t>(y) + h <= _h;
-  const bool canPartial = inBounds && _isScreenOn && _redRamSynced && !_inGrayscaleMode && !_directGrayOnPanel &&
-                          !_directGrayPass && !_forceFullSyncNext && _initialFullSyncsRemaining == 0 &&
-                          !_grayState.lsbValid && !_dtm2DirtyFromStage;
-  if (!canPartial) {
-    display(bus, fb, prev, RefreshMode::Fast, turnOff);
-    return;
-  }
-  const uint16_t xByteStart = static_cast<uint16_t>(x >> 3);
-  const uint16_t xByteEnd = static_cast<uint16_t>((x + w - 1) >> 3);
-  const uint16_t yStart = y;
-  const uint16_t yEnd = static_cast<uint16_t>(y + h - 1);
-  displayPartialSubRect(bus, fb, xByteStart, xByteEnd, yStart, yEnd, turnOff);
-  _dirtyTracker.invalidate();
+  _stagedFrame = StagedFrame::None;
 }
 
 void Uc8253X3Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback,
                                    bool turnOff) {
-  _stagedNextFrame = false;
-  _dirtyTracker.invalidate();
+  invalidateStagedFrame();
   if (mode == GrayscaleMode::Direct && _cfg.directGray) {
     // Stage complete planes before the only display activation. No B/W image is
     // shown.
@@ -418,8 +292,7 @@ void Uc8253X3Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMod
 }
 
 void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) {
-  _stagedNextFrame = false;
-  _dirtyTracker.invalidate();
+  invalidateStagedFrame();
   _absoluteInput = false;
   _directGrayPass = false;
   // OEM V5.6.33 grayscale base update: write the new frame to DTM2 and fire
@@ -447,24 +320,23 @@ void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
       !_redRamSynced || _grayState.lsbValid || _forceFullSyncNext || _initialFullSyncsRemaining > 0;
   if (cleanBaseNeeded) {
     display(bus, fb, nullptr, fallback, /*turnOff=*/false);
-    loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+    loadBankCdi(bus, 0xA9, _cfg.preBwMid);
     triggerRefresh(bus, turnOff);
     return;
   }
   bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
-  loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+  loadBankCdi(bus, 0xA9, _cfg.preBwMid);
   triggerRefresh(bus, turnOff);
   // Keep the driver invariant that DTM1 mirrors the displayed frame; the gray
   // plane writes that normally follow overwrite both planes anyway.
   bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
   _redRamSynced = true;
-  _dtm2DirtyFromStage = false;
+  _stagedFrame = StagedFrame::None;
 }
 
 void Uc8253X3Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
-  _stagedNextFrame = false;
-  _dirtyTracker.invalidate();
+  invalidateStagedFrame();
   // OEM V5.6.33 "AA-pre-BW(mid)" pass: gentle settle of the displayed BW
   // frame (DTM1 == DTM2 == frame after display()'s post-refresh DTM1 sync)
   // that leaves particles receptive to the weak grayscale nudge waveform.
@@ -480,31 +352,15 @@ void Uc8253X3Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, 
   // them (lsbValid), a grayscale refresh left the RAM unsynced, or the gray
   // bank is still loaded — firing the mid bank's strong BW/WB drives against
   // gray-coded state pairs would corrupt the region.
-  if (_inGrayscaleMode || !_redRamSynced || _grayState.lsbValid || _dtm2DirtyFromStage) return;
-  const uint16_t xEndLogical = static_cast<uint16_t>(((x + w - 1) < (_w - 1)) ? (x + w - 1) : (_w - 1));
-  const uint16_t yEndLogical = static_cast<uint16_t>(((y + h - 1) < (_h - 1)) ? (y + h - 1) : (_h - 1));
-  const uint16_t xs = static_cast<uint16_t>(x & ~7u);
-  const uint16_t xe = static_cast<uint16_t>(xEndLogical | 7u);
-  const uint16_t gateYStart = static_cast<uint16_t>((_h - 1) - yEndLogical);
-  const uint16_t gateYEnd = static_cast<uint16_t>((_h - 1) - y);
-  const uint8_t win[9] = {static_cast<uint8_t>(xs >> 8),
-                          static_cast<uint8_t>(xs & 0xFF),
-                          static_cast<uint8_t>(xe >> 8),
-                          static_cast<uint8_t>(xe & 0xFF),
-                          static_cast<uint8_t>(gateYStart >> 8),
-                          static_cast<uint8_t>(gateYStart & 0xFF),
-                          static_cast<uint8_t>(gateYEnd >> 8),
-                          static_cast<uint8_t>(gateYEnd & 0xFF),
-                          0x01};
-  bus.cmd(CMD_PARTIAL_IN);
-  bus.cmdData(CMD_PARTIAL_WINDOW, win, 9);
-  loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+  if (_inGrayscaleMode || !_redRamSynced || _grayState.lsbValid || _stagedFrame != StagedFrame::None) return;
+  enterX3PartialWindow(bus, _w, _h, x, y, w, h);
+  loadBankCdi(bus, 0xA9, _cfg.preBwMid);
   triggerRefresh(bus, /*turnOff=*/false);
   bus.cmd(CMD_PARTIAL_OUT);
 }
 
 void Uc8253X3Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   if (_directGrayPass) {
     writeGrayscalePlaneStrip(bus, GrayPlane::Lsb, lsb, 0, _h);
     return;
@@ -519,7 +375,7 @@ void Uc8253X3Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
 }
 
 void Uc8253X3Driver::copyGrayscaleMsb(EpdBus &bus, const uint8_t *msb) {
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   if (!msb || !_grayState.lsbValid)
     return;
   if (_directGrayPass) {
@@ -528,38 +384,16 @@ void Uc8253X3Driver::copyGrayscaleMsb(EpdBus &bus, const uint8_t *msb) {
   }
   bus.sendPlaneFlipped(CMD_DTM2, msb, _h, _wb); // MSB plane -> "new" RAM
   bus.cmd(CMD_DATA_STOP);
-  _dtm2DirtyFromStage = false;
+  _stagedFrame = StagedFrame::None;
 }
 
 void Uc8253X3Driver::writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, const uint8_t* rows, uint16_t yStart,
                                               uint16_t numRows) {
-  _stagedNextFrame = false;
-  if (!rows || numRows == 0) return;
-  // PTL partial-window in GATE space (logical row y lives at gate H-1-y), rows
-  // emitted bottom-first so they land at the same gates the full-frame write
-  // uses. Fixes the AA/image banding from windowing in logical space.
-  const uint8_t ramCmd = (plane == GrayPlane::Lsb) ? CMD_DTM1 : CMD_DTM2;
-  const uint16_t xEnd = static_cast<uint16_t>(_w - 1);
-  const uint16_t yEndLogical = static_cast<uint16_t>(yStart + numRows - 1);
-  const uint16_t gateYStart = static_cast<uint16_t>((_h - 1) - yEndLogical);
-  const uint16_t gateYEnd = static_cast<uint16_t>((_h - 1) - yStart);
-  const uint8_t win[9] = {0x00,
-                          0x00,
-                          static_cast<uint8_t>(xEnd >> 8),
-                          static_cast<uint8_t>(xEnd & 0xFF),
-                          static_cast<uint8_t>(gateYStart >> 8),
-                          static_cast<uint8_t>(gateYStart & 0xFF),
-                          static_cast<uint8_t>(gateYEnd >> 8),
-                          static_cast<uint8_t>(gateYEnd & 0xFF),
-                          0x01};
-  bus.cmd(CMD_PARTIAL_IN);
-  bus.cmdData(CMD_PARTIAL_WINDOW, win, 9);
-  bus.cmd(ramCmd);
-  auto txn = bus.beginTxn();
-  for (int r = static_cast<int>(numRows) - 1; r >= 0; r--) {
-    txn.writeBytes(rows + static_cast<uint32_t>(r) * _wb, _wb);
-  }
-  txn.end();
+  invalidateStagedFrame();
+  if (!rows || numRows == 0 || yStart >= _h || numRows > _h - yStart) return;
+  enterX3PartialWindow(bus, _w, _h, 0, yStart, _w, numRows);
+  const uint8_t ramCmd = plane == GrayPlane::Lsb ? CMD_DTM1 : CMD_DTM2;
+  bus.sendPlaneFlipped(ramCmd, rows, numRows, _wb);
   bus.cmd(CMD_PARTIAL_OUT);
   if (plane == GrayPlane::Lsb) _grayState.lsbValid = true;
 }
@@ -568,13 +402,12 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
                                  bool factoryMode) {
   (void)fb;
   (void)lut;
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   if (!_grayState.lsbValid) return;
 
   if (_directGrayPass) {
     bus.cmdData2(CMD_VCOM_DATA_INTERVAL, 0xA9, 0x07);
     _loadedCdi0 = 0xA9;
-    _loadedCdi1 = 0x07;
     const auto& bank = *_cfg.directGray;
     loadBank(bus, bank);
     // Strip uploads leave the last band selected; refresh the entire visible
@@ -602,12 +435,12 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
     // already supplies the endpoints. Retain the two calibrated gray drives
     // and idle both endpoints; no mask conversion or extra framebuffer is needed.
     const Uc8253LutBank absoluteGc = {_cfg.gc.vcom, _cfg.gc.bb, _cfg.gc.bw, _cfg.gc.ww, _cfg.gc.bb};
-    loadBankCdi(bus, 0x29, 0x07, absoluteGc);
+    loadBankCdi(bus, 0x29, absoluteGc);
   } else if (factoryMode) {
     // Legacy factory calls retain their B/W bank; typed direct passes return above.
-    loadBankCdi(bus, 0x29, 0x07, _cfg.full);
+    loadBankCdi(bus, 0x29, _cfg.full);
   } else {
-    loadBankCdi(bus, 0x29, 0x07, _cfg.gc);  // OEM 4-level nudge bank
+    loadBankCdi(bus, 0x29, _cfg.gc);  // OEM 4-level nudge bank
   }
   triggerRefresh(bus, turnOff);
 
@@ -620,8 +453,7 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
 }
 
 void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
-  _stagedNextFrame = false;
-  _dirtyTracker.invalidate();
+  invalidateStagedFrame();
   if (_directGrayPass || _directGrayOnPanel) {
     _absoluteInput = false;
     _directGrayPass = false;
@@ -648,7 +480,7 @@ void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
   // cleanBaseNeeded on in steady state.
   _grayState.lsbValid = false;
   _redRamSynced = true;
-  _dtm2DirtyFromStage = false;
+  _stagedFrame = StagedFrame::None;
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
   _inGrayscaleMode = false;
@@ -656,7 +488,7 @@ void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
 
 void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
   (void)fb;
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   if (!_inGrayscaleMode) return;
   _inGrayscaleMode = false;
   // Scrub to clean white: both planes white + the _half scrub bank (CDI 0xA9).
@@ -664,19 +496,18 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
   bus.cmd(CMD_DATA_STOP);
   bus.fillPlane(CMD_DTM2, 0xFF, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
-  loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
+  loadBankCdi(bus, 0xA9, _cfg.half);
   triggerRefresh(bus, false);
   // Both planes are now all-white (BW-coded), not grayscale planes — clear
   // lsbValid to match, or it stays true forever and forces the cleanBaseNeeded
   // path every page.
   _grayState.lsbValid = false;
   _redRamSynced = true;
-  _dtm2DirtyFromStage = false;
+  _stagedFrame = StagedFrame::None;
 }
 
 void Uc8253X3Driver::requestResync(uint8_t settlePasses) {
-  _stagedNextFrame = false;
-  _dirtyTracker.invalidate();
+  invalidateStagedFrame();
   _grayState = {};
   _absoluteInput = false;
   _directGrayPass = false;
@@ -703,38 +534,37 @@ bool Uc8253X3Driver::canStageNextFrame() const {
 }
 
 bool Uc8253X3Driver::stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*), void* abortCtx) {
-  _stagedNextFrame = false;
+  invalidateStagedFrame();
   if (!fb || !canStageNextFrame()) return false;
-  loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
-  _dtm2DirtyFromStage = true;
+  loadBankCdi(bus, 0x29, _cfg.fast);
+  _stagedFrame = StagedFrame::DirtyUpload;
   const bool completed = writeStagedPlane(bus, CMD_DTM2, fb, _h, _wb, shouldAbort, abortCtx);
   bus.cmd(CMD_DATA_STOP);
-  _stagedNextFrame = completed;
+  if (completed) _stagedFrame = StagedFrame::Staged;
   return completed;
 }
 
-bool Uc8253X3Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
-  if (!_stagedNextFrame || !fb || (!_idlePoweredOff && !canStageNextFrame())) {
-    _stagedNextFrame = false;
-    return false;
-  }
-  _stagedNextFrame = false;
-  triggerRefresh(bus, turnOff, " X3_STAGED_DRF");
+void Uc8253X3Driver::invalidateStagedFrame() {
+  if (_stagedFrame == StagedFrame::Staged) _stagedFrame = StagedFrame::DirtyUpload;
+}
+
+bool Uc8253X3Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb) {
+  const bool canTrigger = _stagedFrame == StagedFrame::Staged && fb && (_idlePoweredOff || canStageNextFrame());
+  invalidateStagedFrame();
+  if (!canTrigger) return false;
+  triggerRefresh(bus, false, " X3_STAGED_DRF");
   // Sync DTM1 AFTER the new page is already visible on glass.
   bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
   _grayState.lsbValid = false;
   _redRamSynced = true;
-  _dtm2DirtyFromStage = false;
-  _dirtyTracker.seed(fb, _h, _wb);
+  _stagedFrame = StagedFrame::None;
   return true;
 }
 
 void Uc8253X3Driver::deepSleep(EpdBus& bus) {
   _idlePoweredOff = false;
-  _stagedNextFrame = false;
-  _dtm2DirtyFromStage = false;
-  _dirtyTracker.invalidate();
+  _stagedFrame = StagedFrame::None;
   _loadedBank = {};
   _grayState = {};
   _absoluteInput = false;

@@ -1,13 +1,13 @@
 #pragma once
 
-// UC8253 (Xteink X3) waveform LUTs — 43 bytes each, relocated verbatim from the
-// community-sdk `main` lineage (the production X3 implementation crosspoint
-// ships). Six banks, each VCOM + the four transition LUTs (ww/bw/wb/bb):
+// UC8253 (Xteink X3) waveform LUTs. Six banks with VCOM and four transition
+// LUTs (WW/BW/WB/BB) each.
 //   _normal    : community differential BW page-turn (clean fast diffs)
 //   _half      : scrub bank (WW==BW, WB==BB) to reset after AA grayscale
-//   _fast      : papyrix turbo (full voltages, shortened timing)
+//   _fast      : custom short differential waveform
 //   _full      : OEM stock full/quality image-write (CDI 0x29,0x07)
 //   _gc        : community 4-level grayscale (reader AA + cover rendering)
+//   _aa_pre_bw_mid: OEM grayscale preconditioning
 
 #include <Arduino.h>
 
@@ -57,9 +57,8 @@ inline const uint8_t lut_x3_bb_half[] PROGMEM = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// --- _fast: x3fast ultra-short crisp differential (7 frames @ 80 Hz = 87.5 ms) ---
-// 6 active frames (75 ms) symmetric W<->B at full VDH/VDL rails + 1-frame (12.5 ms)
-// subtle WW/BB top-up in phase 1 + 1 idle settle frame. Full/Half banks stay stock.
+// Custom FAST bank. Six transition frames and one idle settle frame at 80 Hz.
+// The one-frame WW/BB pulse coincides with the second transition phase.
 inline const uint8_t lut_x3_vcom_fast[] PROGMEM = {
     0x00, 0x02, 0x01, 0x02, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

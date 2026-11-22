@@ -49,9 +49,21 @@ class InputManager {
   // Any button release edge since the previous update().
   bool wasAnyReleased() const;
 
+  struct ButtonTransition {
+    uint8_t button = 0;
+    uint8_t pressed = 0;
+    uint32_t timestampMs = 0;
+  };
+  static constexpr uint8_t MAX_FRAME_TRANSITIONS = 16;
+
+  uint8_t frameTransitionCount() const;
+  ButtonTransition frameTransition(uint8_t index) const;
+  bool frameTransitionsOverflowed() const;
+
   // True while a raw state change is still inside the debounce window.
   bool isDebouncePending() const;
   uint32_t pressSequence() const;
+  bool rawInputActive() const;
   bool rawContactActive() const;
 
   // Duration between the first button press and final release.
@@ -219,7 +231,7 @@ class InputManager {
   bool hasToggleSwitch() const { return BoardConfig::ACTIVE.input.toggleSwitch >= 0; }
   // Debounced switch position; begin() latches the boot position without
   // raising a change event. False on boards without a switch.
-  bool isToggleSwitchOn() const { return isAsyncActive() ? _asyncFrame.toggleOn : toggleSwitchOn; }
+  bool isToggleSwitchOn() const { return isAsyncActive() ? _frame.toggleOn : toggleSwitchOn; }
   // True for the one update() in which the debounced position changed.
   // With async polling, use isToggleSwitchOn() to read the position.
   bool wasToggleSwitchChanged() const { return !isAsyncActive() && toggleSwitchChangedEvent; }
@@ -262,13 +274,14 @@ class InputManager {
   }
 
   // --- Optional background polling -------------------------------------------
-  // Poll on a background task. update() collects button counts and levels
-  // since the previous update. The pop methods drain queued presses and gestures.
-  bool beginAsync(uint32_t pollIntervalMs = 5);
+  // Poll on a background task. update() collects button edges and levels.
+  bool beginAsync(UBaseType_t priority = 1, BaseType_t core = -1, uint32_t stackWords = 2048);
+  bool beginAsyncFrame(uint32_t pollIntervalMs = 5, UBaseType_t priority = 2, BaseType_t core = -1,
+                       uint32_t stackWords = 2048);
   bool isAsyncActive() const;
 
-  // Pop the next latched button index (BTN_*) into `button`. Returns false when
-  // no press is pending (or async polling was never started).
+  // Pop the next queued button index (BTN_*) into `button`. Returns false
+  // when the legacy press queue is empty or unavailable.
   bool popPress(uint8_t& button);
 
   // Pop the next latched touch tap (normalized 0..1 panel-native coordinates,
@@ -322,8 +335,11 @@ class InputManager {
 
   static constexpr uint8_t BUTTON_COUNT = BTN_POWER + 1;
   struct AsyncButtonFrame {
-    uint32_t pressed[BUTTON_COUNT]{};
-    uint32_t released[BUTTON_COUNT]{};
+    uint8_t pressed[BUTTON_COUNT]{};
+    uint8_t released[BUTTON_COUNT]{};
+    ButtonTransition transitions[MAX_FRAME_TRANSITIONS]{};
+    uint8_t transitionCount = 0;
+    bool transitionsOverflowed = false;
     unsigned long holdTime = 0;
     unsigned long powerHoldTime = 0;
     uint8_t state = 0;
@@ -332,15 +348,16 @@ class InputManager {
 #if FREEINK_DEVICE_PAPERMONO
     bool powerClick = false;
 #endif
+    void addTransition(uint8_t button, uint8_t isPressed, uint32_t now);
+    void clearEvents();
   };
-  AsyncButtonFrame _asyncFrame;
-  uint8_t _asyncPressed[BUTTON_COUNT]{};
-  uint8_t _asyncReleased[BUTTON_COUNT]{};
+  AsyncButtonFrame _frame;
+  AsyncButtonFrame* _pendingAsyncFrame = nullptr;
+  portMUX_TYPE _asyncFrameLock = portMUX_INITIALIZER_UNLOCKED;
   std::atomic<bool> _asyncActive{false};
   std::atomic<uint32_t> _rawContacts{0};
   std::atomic<uint32_t> _pressSequence{0};
   std::atomic<uint32_t> _asyncAdc{UINT32_MAX};
-  QueueHandle_t _asyncButtonFrames = nullptr;
   QueueHandle_t _asyncQueue = nullptr;
 #if FREEINK_CAP_TOUCH
   QueueHandle_t _asyncTapQueue = nullptr;
@@ -370,10 +387,12 @@ class InputManager {
   QueueHandle_t _asyncMultiTouchPinchQueue = nullptr;
 #endif
   uint32_t _asyncPollMs = 5;
+  bool startAsync(uint32_t pollIntervalMs, UBaseType_t priority, BaseType_t core, uint32_t stackWords, bool queuePresses);
   static void asyncTaskTrampoline(void* self);
   void asyncPoll();
+  void recordButtonTransitions(AsyncButtonFrame& frame, uint32_t now) const;
   void snapshotButtons(AsyncButtonFrame& frame) const;
-  void pollInput();
+  void pollInput(unsigned long now);
   uint8_t updateButtons(unsigned long now, uint32_t& adcReadings);
   uint8_t sampleState(uint32_t* adcReadings = nullptr);
   uint8_t samplePhysicalButtons(uint32_t* adcReadings = nullptr) const;
@@ -383,7 +402,6 @@ class InputManager {
     uint8_t filter(uint8_t raw, uint8_t stable, unsigned long now);
     unsigned long candidateSince = 0;
     uint8_t candidate = 0;
-    uint8_t idlePolls = 0;
   };
   LadderDebounce _ladderGroup1;
   LadderDebounce _ladderGroup2;
@@ -565,7 +583,7 @@ class InputManager {
   static constexpr int ADC_NO_BUTTON = 3900;
   static constexpr unsigned long DEBOUNCE_DELAY = 5;
   static constexpr uint32_t LADDER_PRESS_CONFIRM_MS = 2;
-  static constexpr uint8_t LADDER_RELEASE_POLLS = 3;
+  static constexpr uint32_t LADDER_RELEASE_CONFIRM_MS = 10;
   static constexpr unsigned long CONFIRM_BACK_HOLD_MS = 650;
   static constexpr unsigned long CONFIRM_POWER_HOLD_MS = 400;
   static constexpr unsigned long TWO_BUTTON_HOLD_MS = 650;

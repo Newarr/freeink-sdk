@@ -312,10 +312,8 @@ class PanelDriver {
     (void)data;
   }
 
-  // Speculative next-frame staging: upload a prepared 1-bpp B/W frame into the
-  // controller's NEW-frame RAM plane without triggering a refresh, then fire
-  // the fast differential waveform immediately on button press (zero render &
-  // SPI wait on the critical path).
+  // Staging uploads DTM2 before refresh. Keep the framebuffer pixels through
+  // the trigger, which writes inverted DTM1 before activation in UC8279d night mode.
   virtual bool canStageNextFrame() const { return false; }
   virtual bool stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*) = nullptr,
                               void* abortCtx = nullptr) {
@@ -325,14 +323,16 @@ class PanelDriver {
     (void)abortCtx;
     return false;
   }
-  virtual bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
+  virtual void invalidateStagedFrame() {}
+  virtual bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb) {
     (void)bus;
     (void)fb;
-    (void)turnOff;
     return false;
   }
 
  protected:
+  enum class StagedFrame : uint8_t { None, DirtyUpload, Staged };
+
   __attribute__((noinline)) static bool writeStagedPlane(EpdBus& bus, uint8_t command, const uint8_t* fb,
                                                         uint16_t height, uint16_t widthBytes,
                                                         bool (*shouldAbort)(void*), void* abortCtx) {

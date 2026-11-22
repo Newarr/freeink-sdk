@@ -169,8 +169,9 @@ class FreeInkDisplay {
 
   void displayBuffer(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
   bool canStageNextFrame() const;
+  // Keep the staged framebuffer pixels until triggerStagedFastRefresh() completes.
   bool stageNextFrame(bool (*shouldAbort)(void*) = nullptr, void* abortCtx = nullptr);
-  bool triggerStagedFastRefresh(bool turnOffScreen = false);
+  bool triggerStagedFastRefresh();
 
   // Non-blocking refresh: pushes the frame, starts the panel waveform, and
   // returns (~25 ms) while the panel refreshes on its own (~0.3-2 s). Poll

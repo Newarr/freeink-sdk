@@ -8,6 +8,7 @@ inline void delayMicroseconds(unsigned int) {}
 inline unsigned hostPinModeCalls = 0;
 inline void pinMode(int, int) { ++hostPinModeCalls; }
 inline void digitalWrite(int, int) {}
+inline void gpio_set_level(int, int) {}
 inline int hostDigitalPin = 0;  // the test's detect-pin level
 inline unsigned hostDigitalReadCalls = 0;
 inline int digitalRead(int) {

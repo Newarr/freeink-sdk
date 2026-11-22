@@ -294,7 +294,9 @@ void EpdBus::createPmLocks() {
 
 void EpdBus::waitBusy(const char* tag) { waitBusy(_busy, tag); }
 
-void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
+void EpdBus::waitBusy(BusyPolarity p, const char* tag) { waitBusy(p, tag, false); }
+
+void EpdBus::waitBusy(BusyPolarity p, const char* tag, bool sawAssertion) {
   const unsigned long start = millis();
   // Both hooks engage lazily, only once the wait has proven long (see
   // setBusyWaitHooks). longWait gates the slice hook independently of the
@@ -319,9 +321,9 @@ void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
     // Seeed's SSD2677 driver checks ready HIGH directly (Seeed_GFX2,
     // Driver_SSD2677::busyWait). Allow one tick for command propagation, but
     // don't add 100 ms when a command has already finished or never asserts BUSY.
-    if (p == BusyPolarity::ActiveLowReady) delay(1);
+    if (p == BusyPolarity::ActiveLowReady && !sawAssertion) delay(1);
     bool busy = digitalRead(_pins.busy) == LOW;
-    if (!busy && p == BusyPolarity::ActiveLow) {
+    if (!busy && p == BusyPolarity::ActiveLow && !sawAssertion) {
       while (millis() - start < 100) {
         if (digitalRead(_pins.busy) == LOW) {
           busy = true;
@@ -349,7 +351,7 @@ void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
     // There is deliberately no fixed millisecond timeout on this controller
     // path; issuing the next command while BUSY_N is still LOW can make the UC
     // controller discard plane or LUT writes.
-    delay(1);
+    if (!sawAssertion) delay(1);
     while (digitalRead(_pins.busy) == LOW) {
       busyIdle(longWait, LOW, 1);
       if (!longWait && millis() - start > BUSY_WAIT_HOOK_THRESHOLD_MS) {
@@ -361,7 +363,7 @@ void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
       }
     }
   } else {  // X3TwoPhase: wait for the LOW edge, then wait back to HIGH
-    while (digitalRead(_pins.busy) == HIGH) {
+    while (!sawAssertion && digitalRead(_pins.busy) == HIGH) {
       delay(1);
       if (millis() - start > 1000) break;
     }
@@ -389,12 +391,13 @@ void EpdBus::waitBusy(BusyPolarity p, const char* tag) {
   }
 }
 
-void EpdBus::waitRefreshComplete(const char* tag) {
+void EpdBus::waitRefreshComplete(const char* tag, bool sawAssertion) {
+  if (sawAssertion && !isBusy()) return;
   // The X4 Pro UC production wait is level-based, not edge-qualified. Keep the
   // same one-tick/idle-HIGH rule for refresh completion so a missed assertion
   // edge can never make the caller write RAM while the waveform is still busy.
   if (_busy == BusyPolarity::UcIdleHigh) {
-    waitBusy(_busy, tag);
+    waitBusy(_busy, tag, sawAssertion);
     return;
   }
   // Keep refresh assertion grace even when command waits use the faster
@@ -418,20 +421,20 @@ void EpdBus::waitRefreshComplete(const char* tag) {
     // the poll the same bounded grace here, in the refresh-only context, so
     // waitBusy() itself (which also serves command waits where BUSY may never
     // assert) stays untouched for every other caller.
-    if (_busy == BusyPolarity::ActiveHigh) {
+    if (_busy == BusyPolarity::ActiveHigh && !sawAssertion) {
       const unsigned long graceStart = millis();
       while (digitalRead(_pins.busy) != HIGH && millis() - graceStart < 20) {
         delayMicroseconds(200);
       }
     }
-    waitBusy(refreshPolarity, tag);
+    waitBusy(refreshPolarity, tag, sawAssertion);
     return;
   }
   // ISR-driven completion wait: sleep the task on a semaphore and wake on the
   // exact BUSY completion edge, instead of polling every 1 ms. Falls back to
   // polling if the semaphore could not be created.
   if (!s_epdRefreshDone) {
-    waitBusy(refreshPolarity, tag);
+    waitBusy(refreshPolarity, tag, sawAssertion);
     return;
   }
   // Levels by polarity. CHANGE is armed so both the delayed BUSY assertion and
@@ -444,8 +447,7 @@ void EpdBus::waitRefreshComplete(const char* tag) {
   xSemaphoreTake(s_epdRefreshDone, 0);  // drain any stale token
   attachInterrupt(digitalPinToInterrupt(_pins.busy), epdBusyIsr, CHANGE);
 
-  bool sawWorking = digitalRead(_pins.busy) == workingLevel;
-  if (!sawWorking) {
+  if (!sawAssertion && digitalRead(_pins.busy) != workingLevel) {
     // BUSY assertion can trail MASTER_ACTIVATION by a few microseconds. Sleep
     // until an edge instead of delay(1) polling. No edge in 20 ms means the
     // command was a no-op or its entire pulse completed before we armed.
@@ -453,8 +455,7 @@ void EpdBus::waitRefreshComplete(const char* tag) {
       detachInterrupt(digitalPinToInterrupt(_pins.busy));
       return;
     }
-    sawWorking = digitalRead(_pins.busy) == workingLevel;
-    if (!sawWorking && digitalRead(_pins.busy) == doneLevel) {
+    if (digitalRead(_pins.busy) == doneLevel) {
       detachInterrupt(digitalPinToInterrupt(_pins.busy));
       return;
     }
