@@ -73,7 +73,7 @@ class FreeInkDisplay {
   // periodic-full cadence (currently the EEGO A4's UC8279C driver).
   void setHoldPeriodicFullRefresh(bool hold);
 
-  void begin();
+  void begin(bool preserveFrameBuffer = false);
 
   // Legacy compile-time dimensions kept for compatibility.
   static constexpr uint16_t DISPLAY_WIDTH = 800;

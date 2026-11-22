@@ -267,7 +267,7 @@ const char* FreeInkDisplay::getPanelName() const {
   return nullptr;
 }
 
-void FreeInkDisplay::begin() {
+void FreeInkDisplay::begin(bool preserveFrameBuffer) {
   cancelGrayscalePass();
   DisplayPmLock pmLock;
   selectDriver();
@@ -296,16 +296,18 @@ void FreeInkDisplay::begin() {
   // M5Paper bin). PSRAM-first where available, internal RAM otherwise; heap
   // rather than static storage so tight-DRAM hosts can lend the buffer out
   // via releaseBuffers()/reallocBuffers().
-  if (!frameBuffer0) frameBuffer0 = allocFrameBufferStorage();
+  const bool allocatedPrimary = frameBuffer0 == nullptr;
+  if (allocatedPrimary) frameBuffer0 = allocFrameBufferStorage();
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  if (!frameBuffer1) frameBuffer1 = allocFrameBufferStorage();
+  const bool allocatedSecondary = frameBuffer1 == nullptr;
+  if (allocatedSecondary) frameBuffer1 = allocFrameBufferStorage();
 #endif
 
   frameBuffer = frameBuffer0;
-  if (frameBuffer0) memset(frameBuffer0, 0xFF, bufferSize);
+  if (frameBuffer0 && (!preserveFrameBuffer || allocatedPrimary)) memset(frameBuffer0, 0xFF, bufferSize);
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   frameBufferActive = frameBuffer1;
-  if (frameBuffer1) memset(frameBuffer1, 0xFF, bufferSize);
+  if (frameBuffer1 && (!preserveFrameBuffer || allocatedSecondary)) memset(frameBuffer1, 0xFF, bufferSize);
 #endif
 
   _driver->begin(_bus);
@@ -1170,7 +1172,7 @@ void FreeInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
   cancelGrayscalePass();
   DisplayPmLock pmLock;
   syncPendingAsync();
-  if (!_inverted) {
+  if (!_inverted || !bwBuffer) {
     _driver->cleanupGrayscaleBuffers(_bus, bwBuffer);
   } else if (grayAllowed()) {
     // The driver retains the frame as its next differential baseline.

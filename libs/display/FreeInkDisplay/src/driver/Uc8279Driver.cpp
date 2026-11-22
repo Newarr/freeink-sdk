@@ -228,8 +228,8 @@ void Uc8279Driver::requestResync(uint8_t settlePasses) {
 }
 
 void Uc8279Driver::skipInitialResync() {
-  _oldPlaneValid = true;       // caller asserts the panel already holds a valid frame
-  _initialFullsRemaining = 0;  // ...so don't force the boot clears
+  // Keep _oldPlaneValid false because reset leaves DTM1 unseeded until a caller seeds it.
+  _initialFullsRemaining = 0;
 }
 
 void Uc8279Driver::controllerIdle(EpdBus& bus) {
