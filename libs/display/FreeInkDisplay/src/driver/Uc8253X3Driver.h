@@ -15,6 +15,7 @@
 //
 // X3TwoPhase BUSY; SPI clock board-overridable (default 16 MHz).
 
+#include "FrameDirtyTracker.h"
 #include "PanelDriver.h"
 
 namespace freeink {
@@ -55,6 +56,8 @@ class Uc8253X3Driver : public PanelDriver {
   void deepSleep(EpdBus& bus) override;
 
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
+  void displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y, uint16_t w,
+                     uint16_t h, bool turnOff) override;
   void beginGrayscale(EpdBus &bus, const uint8_t *fb, GrayscaleMode mode,
                             RefreshMode fallback, bool turnOff) override;
   void displayGrayscaleBase(EpdBus &bus, const uint8_t *fb,
@@ -83,6 +86,10 @@ class Uc8253X3Driver : public PanelDriver {
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
 
+  bool canStageNextFrame() const override;
+  bool stageNextFrame(EpdBus& bus, const uint8_t* fb) override;
+  bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) override;
+
 private:
   void initController(EpdBus &bus);
   void loadBank(EpdBus &bus, const Uc8253LutBank &bank);
@@ -90,6 +97,10 @@ private:
                    const Uc8253LutBank &bank);
   void triggerRefresh(EpdBus &bus, bool turnOff, const char *label = " X3_DRF");
   void grayWindowIn(EpdBus &bus);
+  void sendSubPlaneFlipped(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, uint16_t xByteStart, uint16_t xByteEnd,
+                           uint16_t yStart, uint16_t yEnd);
+  void displayPartialSubRect(EpdBus& bus, const uint8_t* fb, uint16_t xByteStart, uint16_t xByteEnd, uint16_t yStart,
+                             uint16_t yEnd, bool turnOff);
 
   const Uc8253X3Config& _cfg;
 
@@ -104,6 +115,11 @@ private:
   bool _absoluteInput = false;
   bool _directGrayPass = false;
   bool _directGrayOnPanel = false;
+  bool _stagedNextFrame = false;
+  bool _dtm2DirtyFromStage = false;
+  Uc8253LutBank _loadedBank = {};
+  uint8_t _loadedCdi0 = 0;
+  uint8_t _loadedCdi1 = 0;
   uint8_t _initialFullSyncsRemaining = 0;
   bool _forceFullSyncNext = false;
   uint8_t _forcedConditionPassesNext = 0;
@@ -111,6 +127,7 @@ private:
     bool lastBaseWasPartial = false;
     bool lsbValid = false;
   } _grayState;
+  FrameDirtyTracker _dirtyTracker;
 };
 
 PanelDriver& uc8253X3Driver();

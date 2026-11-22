@@ -25,6 +25,7 @@
 // UC8253 X3 — reuses BusyPolarity::X3TwoPhase and the async start/finish split.
 
 
+#include "FrameDirtyTracker.h"
 #include "PanelDriver.h"
 
 namespace freeink {
@@ -42,12 +43,18 @@ class Uc8279Driver : public PanelDriver {
   void deepSleep(EpdBus& bus) override;
 
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
+  void displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y, uint16_t w,
+                     uint16_t h, bool turnOff) override;
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
   bool supportsAsyncDisplay() const override { return true; }
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
+
+  bool canStageNextFrame() const override;
+  bool stageNextFrame(EpdBus& bus, const uint8_t* fb) override;
+  bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) override;
 
   // --- 4-level grayscale / anti-aliasing (mirrors the UC8253 X3 sibling) ---
   // Two 1bpp planes (LSB -> DTM1/old, MSB -> DTM2/new) encode 4 levels; the
@@ -96,6 +103,8 @@ class Uc8279Driver : public PanelDriver {
   // path is implicitly windowed (init leaves this PTL set + displayStart's PTIN);
   // the grayscale methods must re-assert it explicitly.
   void grayWindowIn(EpdBus& bus);
+  void sendSubPlaneFlipped(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, uint16_t xByteStart, uint16_t xByteEnd,
+                           uint16_t yStart, uint16_t yEnd);
 
   uint16_t _w;   // visible width  (792)
   uint16_t _h;   // visible height (528)
@@ -123,6 +132,16 @@ class Uc8279Driver : public PanelDriver {
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;
   bool _pendingUsedGc = false;  // this refresh ran the GC bank (spends the budget)
+  bool _stagedNextFrame = false;
+  bool _dtm2DirtyFromStage = false;
+  bool _pendingTrackerUpdated = false;
+  const uint8_t (*_loadedBank)[43] = nullptr;
+  bool _pendingPartialWin = false;
+  uint16_t _pendingWinBx0 = 0;
+  uint16_t _pendingWinBx1 = 0;
+  uint16_t _pendingWinY0 = 0;
+  uint16_t _pendingWinY1 = 0;
+  FrameDirtyTracker _dirtyTracker;
 };
 
 PanelDriver& uc8279Driver();

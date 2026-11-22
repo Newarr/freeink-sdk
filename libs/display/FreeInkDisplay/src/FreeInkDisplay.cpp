@@ -737,6 +737,37 @@ void FreeInkDisplay::displayBuffer(RefreshMode mode, bool turnOffScreen) {
   if (_panelSel != PanelSel::X3) _redRamSynced = true;
 }
 
+bool FreeInkDisplay::canStageNextFrame() const {
+  return _driver != nullptr && !_inversionDirty && !_refreshPending && frameBuffer != nullptr &&
+         _driver->canStageNextFrame();
+}
+
+bool FreeInkDisplay::stageNextFrame() {
+  if (!canStageNextFrame()) return false;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  if (_inverted) invertBytes(frameBuffer, bufferSize);
+  const bool ok = _driver->stageNextFrame(_bus, frameBuffer);
+  if (_inverted) invertBytes(frameBuffer, bufferSize);
+  return ok;
+}
+
+bool FreeInkDisplay::triggerStagedFastRefresh(bool turnOffScreen) {
+  if (!canStageNextFrame()) return false;
+  cancelGrayscalePass();
+  _grayPassFailed = false;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  if (_inverted) invertBytes(frameBuffer, bufferSize);
+  const bool ok = _driver->triggerStagedFastRefresh(_bus, frameBuffer, turnOffScreen);
+  if (_inverted) invertBytes(frameBuffer, bufferSize);
+  if (ok) {
+    _shadowValid = false;
+    _inversionDirty = false;
+  }
+  return ok;
+}
+
 void FreeInkDisplay::displayBufferAsync(RefreshMode mode) { displayAsyncImpl(mode, /*turnOffScreen=*/false); }
 
 void FreeInkDisplay::displayAsyncImpl(RefreshMode mode, bool turnOffScreen, bool noShadow) {

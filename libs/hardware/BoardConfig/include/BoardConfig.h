@@ -1083,7 +1083,7 @@ constexpr BoardProfile XTEINK_X3 = {
     792,
     528,
     {8, 10, 21, 4, 5, 6, PIN_UNASSIGNED},
-    XTEINK_DISPLAY_SPI_HZ,  // displaySpiHz: 10 MHz
+    20000000u,  // displaySpiHz: 20 MHz (UC8253 rated max; cuts X3 plane upload 42ms -> 21ms)
     // powerEnable=GPIO13 = the X3 SD-rail power switch (active-high; HIGH at boot
     // powers the card, the sleep path drives it LOW). Confirmed by X3 factory-firmware
     // RE: setup() does digitalWrite(13,HIGH); every deep-sleep does digitalWrite(13,LOW).
@@ -1122,7 +1122,7 @@ constexpr BoardProfile XTEINK_X3_UC8279 = {
     792,
     528,
     {8, 10, 21, 4, 5, 6, PIN_UNASSIGNED},
-    XTEINK_DISPLAY_SPI_HZ,  // displaySpiHz: 10 MHz
+    20000000u,  // displaySpiHz: 20 MHz (UC8279d rated max; cuts X3 plane upload 42ms -> 21ms)
     {PIN_UNASSIGNED, 7, PIN_UNASSIGNED, 12, 13, false, 0},  // SD powerEnable=GPIO13 (active-high) — see XTEINK_X3
     {0, 1, 2, 3, 4, 5, 3, false},
     0,

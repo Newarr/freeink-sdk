@@ -311,6 +311,23 @@ class PanelDriver {
     (void)enabled;
     (void)data;
   }
+
+  // Speculative next-frame staging: upload a prepared 1-bpp B/W frame into the
+  // controller's NEW-frame RAM plane without triggering a refresh, then fire
+  // the fast differential waveform immediately on button press (zero render &
+  // SPI wait on the critical path).
+  virtual bool canStageNextFrame() const { return false; }
+  virtual bool stageNextFrame(EpdBus& bus, const uint8_t* fb) {
+    (void)bus;
+    (void)fb;
+    return false;
+  }
+  virtual bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
+    (void)bus;
+    (void)fb;
+    (void)turnOff;
+    return false;
+  }
 };
 
 }  // namespace freeink
