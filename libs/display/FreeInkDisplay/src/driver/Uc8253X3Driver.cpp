@@ -101,6 +101,7 @@ void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
     _isScreenOn = true;
+    _idlePoweredOff = false;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   bus.waitBusy(label);
@@ -157,6 +158,7 @@ void Uc8253X3Driver::displayPartialSubRect(EpdBus& bus, const uint8_t* fb, uint1
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
     _isScreenOn = true;
+    _idlePoweredOff = false;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   bus.waitBusy(" X3_PTL_DRF");
@@ -215,6 +217,7 @@ void Uc8253X3Driver::initController(EpdBus& bus) {
   bus.cmd(CMD_DATA_STOP);
 
   _isScreenOn = false;
+  _idlePoweredOff = false;
   _stagedNextFrame = false;
   _dtm2DirtyFromStage = false;
   _loadedBank = {};
@@ -250,7 +253,7 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
     _redRamSynced = false;
     _inGrayscaleMode = false;
   }
-  if (!_isScreenOn && !turnOff) {
+  if (!_isScreenOn && !_idlePoweredOff && !turnOff) {
     mode = RefreshMode::Half;  // wake transition gets a stronger waveform
   }
   if (_inGrayscaleMode) {
@@ -311,6 +314,7 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
     _isScreenOn = true;
+    _idlePoweredOff = false;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   bus.waitBusy(" X3_DRF");
@@ -685,38 +689,37 @@ void Uc8253X3Driver::skipInitialResync() {
   _redRamSynced = true;
 }
 
+void Uc8253X3Driver::controllerIdle(EpdBus& bus) {
+  if (!_isScreenOn) return;
+  bus.cmd(CMD_POWER_OFF);
+  bus.waitBusy(" X3_POF");
+  _isScreenOn = false;
+  _idlePoweredOff = true;
+}
+
 bool Uc8253X3Driver::canStageNextFrame() const {
   return _isScreenOn && _redRamSynced && !_inGrayscaleMode && !_directGrayOnPanel && !_directGrayPass &&
          !_forceFullSyncNext && _initialFullSyncsRemaining == 0 && !_grayState.lsbValid;
 }
 
-bool Uc8253X3Driver::stageNextFrame(EpdBus& bus, const uint8_t* fb) {
-  if (!fb || !canStageNextFrame()) {
-    _stagedNextFrame = false;
-    return false;
-  }
+bool Uc8253X3Driver::stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*), void* abortCtx) {
+  _stagedNextFrame = false;
+  if (!fb || !canStageNextFrame()) return false;
   loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
-  bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
-  bus.cmd(CMD_DATA_STOP);
-  _stagedNextFrame = true;
   _dtm2DirtyFromStage = true;
-  return true;
+  const bool completed = writeStagedPlane(bus, CMD_DTM2, fb, _h, _wb, shouldAbort, abortCtx);
+  bus.cmd(CMD_DATA_STOP);
+  _stagedNextFrame = completed;
+  return completed;
 }
 
 bool Uc8253X3Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
-  if (!_stagedNextFrame || !fb || !canStageNextFrame()) {
+  if (!_stagedNextFrame || !fb || (!_idlePoweredOff && !canStageNextFrame())) {
     _stagedNextFrame = false;
     return false;
   }
   _stagedNextFrame = false;
-  // DTM2, fast LUT, CDI, and PON rails are already resident: fire 1 byte DRF.
-  bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" X3_STAGED_DRF");
-  if (turnOff) {
-    bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" X3_POF");
-    _isScreenOn = false;
-  }
+  triggerRefresh(bus, turnOff, " X3_STAGED_DRF");
   // Sync DTM1 AFTER the new page is already visible on glass.
   bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
@@ -728,6 +731,7 @@ bool Uc8253X3Driver::triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bo
 }
 
 void Uc8253X3Driver::deepSleep(EpdBus& bus) {
+  _idlePoweredOff = false;
   _stagedNextFrame = false;
   _dtm2DirtyFromStage = false;
   _dirtyTracker.invalidate();

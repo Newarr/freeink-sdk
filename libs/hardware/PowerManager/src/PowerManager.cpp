@@ -18,6 +18,15 @@ namespace {
 int8_t powerPin() { return BoardConfig::ACTIVE.input.power; }
 bool powerActiveHigh() { return BoardConfig::ACTIVE.input.powerActiveHigh; }
 
+#if FREEINK_MCU_C3
+void isolateSleepGpios() {
+  static bool isolated = false;
+  if (isolated) return;
+  esp_sleep_config_gpio_isolate();
+  isolated = true;
+}
+#endif
+
 // Records a deepSleep() abort (see deepSleep()) across the esp_restart() that
 // follows it, so the next boot can report it via takeAbortedSleepInfo().
 // RTC_NOINIT_ATTR survives esp_restart() (a warm reset, same RTC-memory domain)
@@ -75,6 +84,9 @@ void PowerManager::armWakeOnPins(uint64_t gpioMask, bool wakeLow) {
 }
 
 bool PowerManager::armPowerButtonWakeup() {
+#if FREEINK_MCU_C3
+  isolateSleepGpios();
+#endif
   const int8_t pin = powerPin();
   if (pin < 0) return false;
   const bool activeHigh = powerActiveHigh();
@@ -163,7 +175,11 @@ void PowerManager::powerDownRailsForSleep() {
 }
 
 void PowerManager::deepSleep() {
+#if FREEINK_MCU_C3
+  isolateSleepGpios();
+#else
   esp_sleep_config_gpio_isolate();
+#endif
 #if !FREEINK_MCU_C61
   gpio_deep_sleep_hold_en();
 #endif
@@ -186,6 +202,9 @@ void PowerManager::deepSleep() {
 
 void PowerManager::deepSleepUntilPowerButton() {
   waitForPowerButtonRelease();
+#if FREEINK_MCU_C3
+  isolateSleepGpios();
+#endif
   armPowerButtonWakeup();
   deepSleep();
 }

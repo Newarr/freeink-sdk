@@ -317,9 +317,12 @@ class PanelDriver {
   // the fast differential waveform immediately on button press (zero render &
   // SPI wait on the critical path).
   virtual bool canStageNextFrame() const { return false; }
-  virtual bool stageNextFrame(EpdBus& bus, const uint8_t* fb) {
+  virtual bool stageNextFrame(EpdBus& bus, const uint8_t* fb, bool (*shouldAbort)(void*) = nullptr,
+                              void* abortCtx = nullptr) {
     (void)bus;
     (void)fb;
+    (void)shouldAbort;
+    (void)abortCtx;
     return false;
   }
   virtual bool triggerStagedFastRefresh(EpdBus& bus, const uint8_t* fb, bool turnOff) {
@@ -327,6 +330,25 @@ class PanelDriver {
     (void)fb;
     (void)turnOff;
     return false;
+  }
+
+ protected:
+  __attribute__((noinline)) static bool writeStagedPlane(EpdBus& bus, uint8_t command, const uint8_t* fb,
+                                                        uint16_t height, uint16_t widthBytes,
+                                                        bool (*shouldAbort)(void*), void* abortCtx) {
+    constexpr int rowsPerBand = 80;
+    bus.cmd(command);
+    // The controller requires CS to stay low across row bands.
+    auto txn = bus.beginTxn();
+    for (int end = height; end > 0;) {
+      if (shouldAbort && shouldAbort(abortCtx)) return false;
+      const int start = end > rowsPerBand ? end - rowsPerBand : 0;
+      while (end > start) {
+        --end;
+        txn.writeBytes(fb + static_cast<uint32_t>(end) * widthBytes, widthBytes);
+      }
+    }
+    return true;
   }
 };
 
